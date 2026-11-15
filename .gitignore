@@ -9,6 +9,9 @@ __pycache__/
 # Secrets (never commit!)
 .env
 
+# Local notes for Claude Code (stays local)
+CLAUDE.md
+
 # Data: raw emails and the database stay local
 data/*
 !data/.gitkeep
