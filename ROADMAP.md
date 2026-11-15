@@ -72,6 +72,9 @@ Claude Code writes the code and explains it; I review, understand every line, an
 - [x] **Phase 0:** repo `job-radar-ai`, venv, folder structure, `.env.example`, `.gitignore`
 - [ ] **Phase 1:** `config.py` (load and check settings) + `email_reader.py` (read new emails via IMAP, save them raw in `data/raw/`)
 - [ ] **Phase 2:** AI extraction: email → structured job list (JSON) via Groq; add `openai` to requirements
+  - `email_cleaner.py`: email → clean text; links become [L1]-style codes (URLs stay local), job-alerts address and name removed
+  - `ai_client.py`: OpenAI-compatible client from `.env` (provider is config only), retries on rate limits
+  - `extractor.py`: strict JSON schema request, validation, results cached in `data/extracted/<uid>.json`
 - [ ] **Phase 3:** SQLite storage and deduplication across sites
 - [ ] **Phase 4:** AI judging (🟢 match / 🟡 unclear / ❌ skip): junior? English? location? skill match?
 - [ ] **Phase 5:** Telegram digest, plus a warning after 3 days without alert emails
