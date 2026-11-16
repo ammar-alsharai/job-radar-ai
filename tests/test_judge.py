@@ -35,6 +35,12 @@ def test_no_wins_over_unknown():
     assert decide_verdict(make_checks(junior="unknown", location="no")) == "skip"
 
 
+def test_title_only_job_is_unclear():
+    # The NN Group case: clear title and city, but no evidence for junior or English.
+    checks = make_checks(junior="unknown", english="unknown", location="yes", skills="yes")
+    assert decide_verdict(checks) == "unclear"
+
+
 def test_yes_and_unknown_mixed_is_unclear():
     assert decide_verdict(make_checks(english="unknown")) == "unclear"
     assert decide_verdict(make_checks("unknown", "unknown", "unknown", "unknown")) == "unclear"

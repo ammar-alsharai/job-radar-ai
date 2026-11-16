@@ -48,10 +48,16 @@ JUDGE_SCHEMA = {
 SYSTEM_PROMPT = """You check one job vacancy against a job seeker's profile.
 
 Be strict and factual. Base every answer only on the job text and the profile below. If the job text does not give enough information, answer "unknown" instead of guessing.
+"yes" needs positive evidence in the job text. Missing information is never a "yes": it is "unknown".
 
 Answer four checks, each "yes", "no" or "unknown":
-- junior_ok: is this job suitable for a junior or career starter? "no" for senior, lead, manager or roles that ask for several years of experience.
-- english_ok: can this job be done in English? Answer "no" ONLY if fluent or native Dutch is explicitly required. A listing written in Dutch without such a requirement is "unknown".
+- junior_ok: is this job suitable for a junior or career starter?
+  "yes" ONLY if the text indicates it: junior, starter, trainee, graduate, intern or stage, 0-2 years of experience, or "no experience required".
+  "no" for senior, lead, manager or roles that ask for several years of experience.
+  "unknown" if there is no snippet and the title has none of these words.
+- english_ok: can this job be done in English?
+  "yes" ONLY if the listing is written in English or explicitly says English is the working language. An English job title alone is not enough: many Dutch companies use English titles. A title-only listing is "unknown".
+  "no" ONLY if fluent or native Dutch is explicitly required. A listing written in Dutch without such a requirement is "unknown".
 - location_ok: is the job within 1 hour by public transport from Den Haag, or remote? "unknown" if the location is unclear.
 - skills_ok: does the job fit the target roles and skills in the profile?
   "yes" when the core of the job is data engineering, data analysis, software or backend development, AI/ML engineering or AI data annotation. A title alone is enough when it clearly says so, even without a snippet.
@@ -62,6 +68,10 @@ Answer four checks, each "yes", "no" or "unknown":
   "Data Engineer" (no snippet) -> "yes"
   "Quality Engineer" whose snippet mentions data analysis -> "no"
   "ICT Unit" (no snippet) -> "unknown"
+
+Full example of a title-only listing:
+Title "AI Engineer", company "NN Group", location "Den Haag", no snippet ->
+junior_ok "unknown" (no junior evidence), english_ok "unknown" (English title only), location_ok "yes", skills_ok "yes".
 
 reason: one short English sentence (max 120 characters) explaining the most important point.
 """
