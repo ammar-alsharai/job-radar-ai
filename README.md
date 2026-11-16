@@ -39,14 +39,14 @@ In Telegram, each title is a link to the job page.
 
 ```mermaid
 flowchart TD
-    subgraph actions["GitHub Actions — daily at 11:23, backup run at 14:23"]
-        restore[("Encrypted database<br/>(Actions cache)")] -->|decrypt| gmail
-        gmail["Gmail inbox<br/>IMAP, read-only"] --> cleaner["Email cleaner<br/>links → [L1] codes,<br/>name and address removed"]
-        cleaner --> extract["AI extraction<br/>Groq, strict JSON schema"]
+    subgraph actions["GitHub Actions"]
+        restore[("Encrypted DB<br/>(Actions cache)")] -->|decrypt| gmail
+        gmail["Gmail inbox<br/>IMAP, read-only"] --> cleaner["Email cleaner<br/>links → [L1]<br/>name, address<br/>removed"]
+        cleaner --> extract["AI extraction<br/>Groq<br/>strict JSON"]
         extract --> db[("SQLite<br/>+ deduplication")]
-        db --> judge["AI judge: 4 checks<br/>+ Python verdict"]
+        db --> judge["AI judge<br/>4 checks<br/>+ Python verdict"]
         judge --> telegram["Telegram digest"]
-        telegram -->|encrypt| save[("Encrypted database<br/>(Actions cache)")]
+        telegram -->|encrypt| save[("Encrypted DB<br/>(Actions cache)")]
     end
 ```
 
@@ -57,7 +57,7 @@ Every run reads the recent alert emails, skips the ones that were already proces
 **Email alerts instead of scraping.** Job sites forbid automated collection in their terms. Instead, the agent reads the alert emails the sites send anyway, and it never opens job links. Alerts are kept broad; the AI does the narrowing.
 
 **Privacy by design.**
-- The agent uses a **separate job-alerts inbox**, so it never touches personal email, and a leaked app password only exposes job alerts.
+- The agent uses a **separate job-alerts inbox**, using a separate Gmail account that only receives job alerts so it never touches personal email.
 - Before any text goes to the AI, every **link is replaced by a short code** like `[L1]`. The AI answers with codes and the real URLs are looked up locally, so the AI never sees tracking links.
 - The inbox **address and the owner's name are removed** from the text.
 - The AI provider (Groq) is used with **Zero Data Retention** enabled.
