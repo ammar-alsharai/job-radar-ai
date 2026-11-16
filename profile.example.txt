@@ -1,0 +1,13 @@
+# Copy this file to profile.txt and describe what you are looking for.
+# profile.txt is sent to the AI with every job, and it is gitignored.
+# Do NOT put your name, email, phone number, address or full CV in it:
+# a short skills summary is enough.
+# Lines starting with # are ignored.
+
+Target roles: <e.g. junior data engineer, Python/backend developer>
+Experience level: <e.g. career starter, about 1 year of experience>
+Skills: <e.g. Python, SQL, Git, Linux>
+Learning / familiar with: <e.g. Docker, cloud basics>
+Languages: <e.g. English fluent, Dutch basic (A2)>
+Location: <e.g. within 1 hour by public transport from Den Haag, or remote>
+Not interested in: <e.g. sales, support desk, warehouse jobs>

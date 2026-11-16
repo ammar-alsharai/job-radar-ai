@@ -9,10 +9,12 @@ MIME parts
 An email is often made of several "parts" (MIME = the standard for this):
 for example a text/plain version, a text/html version of the same message,
 and maybe images or attachments. We walk through all parts and pick the
-plain-text version if there is one, otherwise the HTML version.
+HTML version if there is one (that is what people see), otherwise the
+plain-text version.
 """
 
 import email
+import html
 import logging
 import re
 from email import policy
@@ -30,9 +32,24 @@ MAX_TEXT_CHARS = 12_000
 # that is not a space, quote or bracket.
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'()\[\]]+")
 
-# Invisible characters that marketing emails use for spacing tricks.
-# They carry no meaning and only waste tokens.
-INVISIBLE_CHARS = ["​", "‌", "‍", "⁠", "﻿", "­", "͏"]
+# Invisible characters that marketing emails use for spacing tricks (often as
+# long runs of "&zwnj;"). They carry no meaning and only waste tokens.
+# Written as \u codes because they are invisible in the editor.
+INVISIBLE_CHARS = [
+    "​",  # zero-width space
+    "‌",  # zero-width non-joiner (&zwnj;)
+    "‍",  # zero-width joiner
+    "‎",  # left-to-right mark
+    "‏",  # right-to-left mark
+    "⁠",  # word joiner
+    "﻿",  # byte order mark (BOM)
+    "­",  # soft hyphen
+    "͏",  # combining grapheme joiner
+]
+
+# Finds leftover HTML tags in plain text, like <br> or </td>: a "<", maybe a
+# "/", then a LETTER. "<[L1]>" or "a < b" are not tags and stay.
+TAG_PATTERN = re.compile(r"</?[a-zA-Z][^<>]*>")
 
 # HTML tags whose content is never visible text. (Not "head": some emails
 # never close it, and then we would skip the whole email.)
@@ -107,8 +124,8 @@ class HtmlToText(HTMLParser):
 
 def get_body(message):
     """Return (body_text, is_html) for the best text part of the email."""
-    plain = None
-    html = None
+    plain_body = None
+    html_body = None
     for part in message.walk():
         # Skip attachments: we only want the message itself.
         if part.get_content_disposition() == "attachment":
@@ -116,15 +133,17 @@ def get_body(message):
         content_type = part.get_content_type()
         # get_content() also undoes the transfer encoding (base64, quoted-
         # printable) and the character set, so we get a normal string.
-        if content_type == "text/plain" and plain is None:
-            plain = part.get_content()
-        elif content_type == "text/html" and html is None:
-            html = part.get_content()
+        if content_type == "text/plain" and plain_body is None:
+            plain_body = part.get_content()
+        elif content_type == "text/html" and html_body is None:
+            html_body = part.get_content()
 
-    if plain and plain.strip():
-        return plain, False
-    if html:
-        return html, True
+    # HTML first: it is what people actually see. Some senders put the jobs
+    # only in the HTML and send a stripped plain-text copy.
+    if html_body and html_body.strip():
+        return html_body, True
+    if plain_body:
+        return plain_body, False
     return "", False
 
 
@@ -175,11 +194,16 @@ def clean_email(raw_bytes):
 
     link_codes = LinkCodes()
     if is_html:
+        # The parser also decodes entities such as &amp; and &zwnj;.
         parser = HtmlToText(link_codes)
         parser.feed(body)
         text = parser.get_text()
     else:
-        text = body
+        # Plain text can still contain entities ("&amp;") and stray tags ("<br>").
+        text = html.unescape(body)
+        # URLs first: "<https://...>" would otherwise look like a tag and be removed.
+        text = replace_urls(text, link_codes)
+        text = TAG_PATTERN.sub(" ", text)
 
     # Put the subject on top: it often says what the alert is about. It goes
     # through the same cleaning below, because it can contain the name too.

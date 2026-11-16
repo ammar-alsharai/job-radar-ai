@@ -75,12 +75,15 @@ Claude Code writes the code and explains it; I review, understand every line, an
   - `email_cleaner.py`: email → clean text; links become [L1]-style codes (URLs stay local), job-alerts address and name removed
   - `ai_client.py`: OpenAI-compatible client from `.env` (provider is config only), retries on rate limits
   - `extractor.py`: strict JSON schema request, validation, results cached in `data/extracted/<uid>.json`
-- [ ] **Phase 3:** SQLite storage and deduplication across sites
+- [x] **Phase 3:** SQLite storage and deduplication across sites
   - `storage.py`: tables `jobs` (one row per unique job) and `sightings` (one row per email it appeared in)
-  - Readable dedup key `company|title|location` after normalizing (accents, punctuation, legal suffixes like B.V.); the link is added when the company is empty, so those jobs are never merged
+  - Readable dedup key `company|title|location` after normalizing (accents, punctuation, legal suffixes like B.V.); when the company is empty (agencies like Randstad), the source is used instead: `|title|location|source`, because agencies use a different tracking link in every email
   - Dates come from the email's Date header; `--stats` and `--rebuild-db` (rebuild from `data/extracted/`) in `main.py`
   - Tests in `tests/test_storage.py` (pytest, in `requirements-dev.txt`)
 - [ ] **Phase 4:** AI judging (🟢 match / 🟡 unclear / ❌ skip): junior? English? location? skill match?
+  - `judge.py`: the AI answers four checks (yes / no / unknown) and a short reason; Python decides the verdict (any no → skip, all yes → match, otherwise unclear)
+  - One AI call per job; only job fields and `profile.txt` (gitignored, template in `profile.example.txt`) are sent, never links
+  - Verdicts stored in `jobs.db` (verdict, verdict_reason, judge_checks, judged_at); `--rejudge` after profile changes; tests in `tests/test_judge.py`
 - [ ] **Phase 5:** Telegram digest, plus a warning after 3 days without alert emails
   - Note: `--rebuild-db` will erase verdicts and notified_at; before Phase 5, make rebuild keep them or mark all rebuilt jobs as already notified, so old jobs are never re-sent.
 - [ ] **Phase 6:** Automate with GitHub Actions, plus a backup run

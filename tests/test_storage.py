@@ -11,7 +11,15 @@ its own database and never touches data/jobs.db.
 import sqlite3
 from datetime import datetime
 
-from job_radar.storage import make_dedup_key, normalize, normalize_company, save_jobs
+from job_radar.storage import (
+    clear_verdicts,
+    get_unjudged_jobs,
+    make_dedup_key,
+    normalize,
+    normalize_company,
+    save_jobs,
+    save_verdict,
+)
 
 
 def make_job(email_uid, title="Data Engineer", company="Eneco", location="Rotterdam"):
@@ -82,9 +90,24 @@ def test_dedup_key_is_readable():
     assert make_dedup_key(make_job("1")) == "eneco|data engineer|rotterdam"
 
 
-def test_jobs_without_company_are_not_merged():
+def test_job_without_company_uses_source_in_key():
+    job = make_job("1", company="")
+    job["source"] = "randstad.nl"
+    assert make_dedup_key(job) == "|data engineer|rotterdam|randstad.nl"
+
+
+def test_job_without_company_from_same_source_is_merged():
+    # Same agency job in two emails, each with its own tracking link.
     job_a = make_job("1", company="")
     job_b = make_job("2", company="")
+    assert job_a["link"] != job_b["link"]
+    assert make_dedup_key(job_a) == make_dedup_key(job_b)
+
+
+def test_jobs_without_company_from_different_sources_are_not_merged():
+    job_a = make_job("1", company="")
+    job_b = make_job("2", company="")
+    job_b["source"] = "other-site.nl"
     assert make_dedup_key(job_a) != make_dedup_key(job_b)
 
 
@@ -139,3 +162,22 @@ def test_dates_cover_first_and_last_email(tmp_path):
         conn.close()
     assert first_seen == "2026-11-13"
     assert last_seen == "2026-11-15"
+
+
+# --- verdicts (Phase 4) ------------------------------------------------------
+
+def test_verdicts_are_saved_and_cleared(tmp_path):
+    db_path = tmp_path / "jobs.db"
+    save_jobs([make_job("101"), make_job("101", location="Den Haag")], db_path)
+
+    unjudged = get_unjudged_jobs(db_path)
+    assert len(unjudged) == 2
+    assert "link" not in unjudged[0]  # the judge never gets the link
+
+    result = {"junior_ok": "yes", "english_ok": "yes", "location_ok": "yes",
+              "skills_ok": "yes", "reason": "Good fit.", "verdict": "match"}
+    save_verdict(db_path, unjudged[0]["id"], result)
+    assert len(get_unjudged_jobs(db_path)) == 1
+
+    assert clear_verdicts(db_path) == 2
+    assert len(get_unjudged_jobs(db_path)) == 2

@@ -65,3 +65,6 @@ def require_ai_settings():
 RAW_EMAIL_DIR = PROJECT_ROOT / "data" / "raw"
 EXTRACTED_DIR = PROJECT_ROOT / "data" / "extracted"
 DB_PATH = PROJECT_ROOT / "data" / "jobs.db"
+
+# My profile for the AI judge (gitignored, written by hand)
+PROFILE_PATH = PROJECT_ROOT / "profile.txt"

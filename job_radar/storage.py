@@ -28,6 +28,7 @@ the worst case, change what it does ("SQL injection"). With "?", SQLite
 always treats the value as plain data, never as SQL.
 """
 
+import json
 import re
 import sqlite3
 import unicodedata
@@ -54,6 +55,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_seen TEXT NOT NULL,
     verdict TEXT,            -- Phase 4
     verdict_reason TEXT,     -- Phase 4
+    judge_checks TEXT,       -- Phase 4: the four checks as JSON
     judged_at TEXT,          -- Phase 4
     notified_at TEXT         -- Phase 5
 )
@@ -113,15 +115,18 @@ def normalize_company(company):
 def make_dedup_key(job):
     """Build a readable key like "eneco|data engineer|rotterdam".
 
-    If the company is unknown, the link (or the email UID) is added, so jobs
-    without a company are never merged with each other.
+    If the company is unknown (agencies like Randstad often leave it out),
+    the source is used instead: "|data engineer|rotterdam|randstad.nl". So the
+    same agency job from several emails is merged, but it is never merged with
+    a job from another site that also has no company. (Not the link: agencies
+    use a different tracking link in every email.)
     """
     company = normalize_company(job.get("company", ""))
     title = normalize(job.get("title", ""))
     location = normalize(job.get("location", ""))
     key = f"{company}|{title}|{location}"
     if not company:
-        key += "|" + (job.get("link") or f"email {job.get('email_uid', '')}")
+        key += "|" + (job.get("source") or "").lower()
     return key
 
 
@@ -183,11 +188,72 @@ def save_jobs(jobs, db_path, seen_at=None):
     return new_jobs
 
 
+def get_unjudged_jobs(db_path):
+    """Return every job without a verdict, as a list of dicts (oldest first)."""
+    conn = connect(db_path)
+    # sqlite3.Row lets us read columns by name (row["title"]) instead of by
+    # position (row[1]), and dict(row) turns a row into a normal dict.
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """SELECT id, title, company, location, language, seniority, salary, snippet
+               FROM jobs WHERE verdict IS NULL ORDER BY id"""
+        ).fetchall()
+    finally:
+        conn.close()
+    # "IS NULL" (not "= NULL"): in SQL, NULL means "no value", and nothing is
+    # ever equal to "no value", so "= NULL" would never match.
+    return [dict(row) for row in rows]
+
+
+def save_verdict(db_path, job_id, result):
+    """Store the judge's result for one job.
+
+    result: dict with the four checks, "reason" and "verdict" (from judge.judge_job).
+    """
+    checks = {
+        "junior_ok": result["junior_ok"],
+        "english_ok": result["english_ok"],
+        "location_ok": result["location_ok"],
+        "skills_ok": result["skills_ok"],
+    }
+    judged_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = connect(db_path)
+    try:
+        with conn:
+            conn.execute(
+                """UPDATE jobs SET verdict = ?, verdict_reason = ?, judge_checks = ?, judged_at = ?
+                   WHERE id = ?""",
+                (result["verdict"], result["reason"], json.dumps(checks), judged_at, job_id),
+            )
+    finally:
+        conn.close()
+
+
+def clear_verdicts(db_path):
+    """Remove all verdicts, so every job is judged again. Returns the number of jobs."""
+    conn = connect(db_path)
+    try:
+        with conn:
+            cursor = conn.execute(
+                """UPDATE jobs SET verdict = NULL, verdict_reason = NULL,
+                                   judge_checks = NULL, judged_at = NULL"""
+            )
+            count = cursor.rowcount  # how many rows the UPDATE changed
+    finally:
+        conn.close()
+    return count
+
+
 def get_stats(db_path):
-    """Return a dict with total jobs, jobs per source and jobs first seen today."""
+    """Return a dict with total jobs, jobs per source, jobs first seen today and verdict counts."""
     conn = connect(db_path)
     try:
         total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        # NULL verdicts (not judged yet) are grouped together as one row.
+        per_verdict = conn.execute(
+            "SELECT verdict, COUNT(*) FROM jobs GROUP BY verdict ORDER BY COUNT(*) DESC"
+        ).fetchall()
         # A job can come from several sites, so count it once per source.
         per_source = conn.execute(
             """SELECT source, COUNT(DISTINCT job_id) FROM sightings
@@ -199,4 +265,9 @@ def get_stats(db_path):
         ).fetchone()[0]
     finally:
         conn.close()
-    return {"total": total, "per_source": per_source, "first_seen_today": first_seen_today}
+    return {
+        "total": total,
+        "per_source": per_source,
+        "first_seen_today": first_seen_today,
+        "per_verdict": per_verdict,
+    }

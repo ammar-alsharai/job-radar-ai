@@ -3,13 +3,15 @@
 Phase 1: read recent job-alert emails and save them to data/raw/.
 Phase 2: let the AI extract the jobs from each email (saved to data/extracted/).
 Phase 3: store the jobs in data/jobs.db and report which ones are new.
+Phase 4: let the AI judge every job that has no verdict yet (profile.txt).
 
 Usage:
-    python main.py --days 3          read emails, extract jobs, store them
+    python main.py --days 3          read emails, extract, store and judge jobs
     python main.py --days 3 --no-ai  only read emails (Phase 1)
     python main.py --preview 35      show what would be sent to the AI for email 35
     python main.py --stats           show database statistics
     python main.py --rebuild-db      rebuild data/jobs.db from data/extracted/
+    python main.py --rejudge         judge every job again (after changing profile.txt)
 """
 
 import argparse
@@ -33,7 +35,7 @@ def parse_args():
     parser.add_argument(
         "--no-ai",
         action="store_true",
-        help="only read and save emails, skip the AI extraction",
+        help="only read and save emails, skip the AI extraction and judging",
     )
     parser.add_argument(
         "--re-extract",
@@ -55,6 +57,11 @@ def parse_args():
         action="store_true",
         help="delete data/jobs.db and rebuild it from data/extracted/ (no Gmail, no AI). "
              "WARNING: this also erases verdicts and notified_at (Phase 4/5 data)",
+    )
+    parser.add_argument(
+        "--rejudge",
+        action="store_true",
+        help="clear all verdicts and judge every job again (no Gmail, no extraction)",
     )
     parser.add_argument(
         "--debug",
@@ -166,6 +173,57 @@ def rebuild_db():
     print("Done.")
 
 
+VERDICT_LABELS = [("match", "🟢 match"), ("unclear", "🟡 unclear"), ("skip", "❌ skip")]
+
+
+def judge_all():
+    """Phase 4: judge every job without a verdict and print them grouped by verdict."""
+    from job_radar import config
+    from job_radar.judge import judge_job, load_profile
+    from job_radar.storage import get_unjudged_jobs, save_verdict
+
+    jobs = get_unjudged_jobs(config.DB_PATH)
+    print()
+    print(f"Judging {len(jobs)} job(s) without a verdict ...")
+    if not jobs:
+        return
+
+    profile = load_profile()  # only needed when there is something to judge
+    judged = {"match": [], "unclear": [], "skip": []}
+    for job in jobs:
+        result = judge_job(job, profile)
+        if result is None:
+            continue  # invalid answer: stays unjudged, tried again next run
+        # Saved right away, so a stop halfway (e.g. rate limit) loses nothing.
+        save_verdict(config.DB_PATH, job["id"], result)
+        judged[result["verdict"]].append((job, result["reason"]))
+
+    for verdict, label in VERDICT_LABELS:
+        print()
+        print(f"{label} ({len(judged[verdict])})")
+        for job, reason in judged[verdict]:
+            parts = [job["title"], job["company"], job["location"]]
+            print("    " + " | ".join(part or "-" for part in parts) + f" — {reason}")
+
+    not_judged = len(jobs) - sum(len(items) for items in judged.values())
+    if not_judged:
+        print()
+        print(f"{not_judged} job(s) could not be judged (invalid AI answer); they are retried next run.")
+
+
+def rejudge_all():
+    """Clear every verdict, then judge all jobs again."""
+    from job_radar import config
+    from job_radar.judge import load_profile
+    from job_radar.storage import clear_verdicts
+
+    # Check profile.txt BEFORE clearing, so a missing profile never wipes the verdicts.
+    load_profile()
+    count = clear_verdicts(config.DB_PATH)
+    print(f"Re-judging {count} job(s): all verdicts cleared.")
+    judge_all()
+
+
 def show_stats():
     """Print the database statistics."""
     from job_radar import config
@@ -178,11 +236,21 @@ def show_stats():
     print("Jobs per source:")
     for source, count in stats["per_source"]:
         print(f"    {source or '-'}: {count}")
+    print("Jobs per verdict:")
+    for verdict, count in stats["per_verdict"]:
+        print(f"    {verdict or 'not judged yet'}: {count}")
 
 
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # The HTTP library and the openai package log every request and every
+    # automatic retry at INFO level. Only show their warnings and errors, so
+    # the output (public on GitHub Actions later) stays short. "httpx2" is the
+    # name the HTTP library uses in our installed version; "httpx" covers the
+    # original library name in case that is installed instead.
+    for noisy_logger in ["httpx", "httpx2", "openai"]:
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     if args.debug:
         # Only our own modules (job_radar.*) go to DEBUG. Other packages such as
         # openai stay at INFO: their DEBUG output is noisy and includes request details.
@@ -198,11 +266,14 @@ def main():
         elif args.rebuild_db:
             rebuild_db()
             show_stats()
+        elif args.rejudge:
+            rejudge_all()
         else:
             emails = read_emails(args.days)
             if not args.no_ai:
                 # --re-extract turns the cache off for this run.
                 extract_and_store(emails, use_cache=not args.re_extract)
+                judge_all()
     except RuntimeError as error:
         # Our own messages: missing setting, Gmail login failed, ...
         print(f"Error: {error}")

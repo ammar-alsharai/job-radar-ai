@@ -28,6 +28,17 @@ LANGUAGES = ["english", "dutch", "unknown"]
 SENIORITY_LEVELS = ["intern", "junior", "medior", "senior", "unknown"]
 MAX_SNIPPET_CHARS = 300
 
+# Company values that really mean "no company given". Compared in lowercase.
+PLACEHOLDER_COMPANIES = ["-", "–", "—", "n.v.t.", "nvt", "n/a", "onbekend", "unknown"]
+
+
+def clean_company(company):
+    """Return the company name, or "" if it is only a placeholder like "-" or "onbekend"."""
+    company = company.strip()
+    if company.lower() in PLACEHOLDER_COMPANIES:
+        return ""
+    return company
+
 # What one AI answer must look like: {"jobs": [ {...}, {...} ]}
 JOB_SCHEMA = {
     "type": "object",
@@ -178,7 +189,7 @@ def extract_jobs(uid, raw_bytes, use_cache=True):
             snippet = snippet[:MAX_SNIPPET_CHARS].rstrip() + "…"
         jobs.append({
             "title": raw_job["title"].strip(),
-            "company": raw_job["company"].strip(),
+            "company": clean_company(raw_job["company"]),
             "location": raw_job["location"].strip(),
             "language": raw_job["language"],
             "seniority": raw_job["seniority"],
