@@ -76,8 +76,24 @@ def test_broken_json_is_rejected():
 
 
 def test_long_reason_is_cut():
+    # One very long "word": no space to cut at, so it is cut at the limit.
     result = validate_judgement(fake_answer(reason="x" * 300))
     assert len(result["reason"]) == judge.MAX_REASON_CHARS + 1  # + the "…"
+
+
+def test_long_reason_is_cut_at_a_word_boundary():
+    reason = "Senior role that asks for many years of experience, " * 5
+    result = validate_judgement(fake_answer(reason=reason))
+
+    assert len(result["reason"]) <= judge.MAX_REASON_CHARS + 1
+    assert result["reason"].endswith("…")
+    shortened = result["reason"][:-1]                 # without the "…"
+    assert reason.startswith(shortened)               # nothing rewritten
+    assert reason[len(shortened)] in " ,"             # cut right before a space/comma
+
+
+def test_short_reason_is_unchanged():
+    assert judge.shorten("Good fit.", 100) == "Good fit."
 
 
 # --- judge_job with a fake AI ------------------------------------------------

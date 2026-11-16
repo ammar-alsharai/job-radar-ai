@@ -1,9 +1,10 @@
 # Job Radar AI: daily run on GitHub Actions.
 #
-# Main trigger: cron-job.org calls the workflow_dispatch API every day at
-# 18:00 Amsterdam time. GitHub's own schedule (often hours late) is only a
-# fallback. Every run uses --skip-if-sent-today, so the first successful run
-# of the day sends the digest and later runs stop right away.
+# Runs every day at 11:23 with a backup run at 14:23 (Europe/Amsterdam).
+# GitHub's schedule can be late or skip a run, hence the backup. Every run
+# uses --skip-if-sent-today, so the first successful run of the day sends the
+# digest and the backup stops right away. workflow_dispatch allows a manual
+# run (and the one-time mark_all_sent run).
 #
 # The repo is PUBLIC: logs are public and caches are readable from pull
 # requests, so the program runs with --ci (counts only) and the database is
@@ -36,7 +37,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       # All dates (last digest, first seen, 3-day warning) in Amsterdam time.
       TZ: Europe/Amsterdam

@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 CHECKS = ["junior_ok", "english_ok", "location_ok", "skills_ok"]
 ANSWERS = ["yes", "no", "unknown"]
-MAX_REASON_CHARS = 120
+MAX_REASON_CHARS = 100
 
 # The job fields sent to the AI. Never the link, email UID or source.
 JOB_FIELDS_FOR_AI = ["title", "company", "location", "language", "seniority", "salary", "snippet"]
@@ -74,7 +74,7 @@ Full example of a title-only listing:
 Title "AI Engineer", company "NN Group", location "Den Haag", no snippet ->
 junior_ok "unknown" (no junior evidence), english_ok "unknown" (English title only), location_ok "yes", skills_ok "yes".
 
-reason: one short English sentence (max 120 characters) explaining the most important point.
+reason: one short English sentence (max 100 characters) explaining the most important point.
 """
 
 
@@ -113,6 +113,20 @@ def decide_verdict(checks):
     return "unclear"
 
 
+def shorten(text, limit):
+    """Cut text to at most `limit` characters at a word boundary, adding "…".
+
+    Example with limit 20: "Junior Python role in Den Haag" -> "Junior Python role…"
+    """
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    last_space = cut.rfind(" ")  # position of the last space, or -1 if none
+    if last_space > 0:
+        cut = cut[:last_space]  # drop the half word at the end
+    return cut.rstrip(" ,.;:-") + "…"
+
+
 def validate_judgement(answer_text):
     """Check the AI answer. Return a clean dict (checks + reason), or None if invalid."""
     try:
@@ -127,9 +141,7 @@ def validate_judgement(answer_text):
     if not isinstance(data.get("reason"), str):
         return None
 
-    reason = data["reason"].strip()
-    if len(reason) > MAX_REASON_CHARS:
-        reason = reason[:MAX_REASON_CHARS].rstrip() + "…"
+    reason = shorten(data["reason"].strip(), MAX_REASON_CHARS)
     result = {name: data[name] for name in CHECKS}
     result["reason"] = reason
     return result

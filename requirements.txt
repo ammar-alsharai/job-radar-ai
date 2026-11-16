@@ -1,3 +1,5 @@
-python-dotenv
-openai
-cryptography
+# "~=X.Y.Z" means: version X.Y.Z or a newer patch release (X.Y.*), but never
+# the next minor or major version, so an update cannot silently break the daily run.
+python-dotenv~=1.2.4
+openai~=3.51.0
+cryptography~=50.0.2

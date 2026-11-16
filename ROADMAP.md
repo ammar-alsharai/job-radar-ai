@@ -1,6 +1,6 @@
 # Job Radar AI – Roadmap
 
-An AI agent that runs every evening without being asked: it reads the job-alert emails that arrived that day, uses AI to turn them into one clean list, removes duplicates, judges each job against what I'm looking for, stores everything, and sends me one Telegram digest.
+An AI agent that runs every day without being asked: it reads the job-alert emails that arrived since the last run, uses AI to turn them into one clean list, removes duplicates, judges each job against what I'm looking for, stores everything, and sends me one Telegram digest.
 
 **Target roles:** junior data engineer, Python/backend developer, software engineer, data analyst.
 **Area:** Den Haag and Zuid-Holland (max 1 hour travel) or remote. English as working language first.
@@ -8,7 +8,7 @@ An AI agent that runs every evening without being asked: it reads the job-alert 
 ## Pipeline
 
 1. Job sites send alert emails to a dedicated job-alerts Gmail.
-2. GitHub Actions starts the agent every evening at 18:00 (triggered by cron-job.org; GitHub's schedule as fallback).
+2. GitHub Actions starts the agent every day at 11:23, with a backup run at 14:23 (Europe/Amsterdam).
 3. Read new emails with IMAP (`imaplib`) and save them raw.
 4. The AI (Groq) extracts each job into structured JSON: title, company, location, language, seniority, link.
 5. Deduplicate across sites and store in SQLite.
@@ -52,7 +52,7 @@ Both Groq and Mistral work with the `openai` Python package by changing the base
 | No forwarding from the personal Gmail, no second LinkedIn account | My choice / LinkedIn forbids fake accounts |
 | Provider-independent AI layer | Free tiers change; the provider is config only |
 | Broad alerts, strict AI filtering | Keeps volume up; the AI does the narrowing |
-| External trigger + backup schedule | GitHub's schedule is often hours late or skipped: cron-job.org starts the run at 18:00 via the API, GitHub's schedule (20:23, 21:23) is the fallback; later runs skip themselves if the digest was sent |
+| Main run + backup run | GitHub's schedule can be late or skip a run: a backup run at 14:23 follows the 11:23 run, and skips itself if the digest was already sent |
 | Encrypted database in the Actions cache | The repo is public: caches are readable from pull requests and logs are public, so the DB is cached only encrypted and cloud runs print only counts |
 | No personal details sent to the AI | A short skills summary instead of the full CV |
 | Secrets only in `.env` and GitHub Secrets | Never in code, chats or commits |
@@ -85,17 +85,27 @@ Claude Code writes the code and explains it; I review, understand every line, an
   - `judge.py`: the AI answers four checks (yes / no / unknown) and a short reason; Python decides the verdict (any no → skip, all yes → match, otherwise unclear)
   - One AI call per job; only job fields and `profile.txt` (gitignored, template in `profile.example.txt`) are sent, never links
   - Verdicts stored in `jobs.db` (verdict, verdict_reason, judge_checks, judged_at); `--rejudge` after profile changes; tests in `tests/test_judge.py`
-- [ ] **Phase 5:** Telegram digest, plus a warning after 3 days without alert emails
+- [x] **Phase 5:** Telegram digest, plus a warning after 3 days without alert emails
   - `notifier.py`: Telegram Bot API via `urllib` (no extra packages); HTML-escaped digest (🟢 match, 🟡 unclear sorted by yes-count, skipped only counted), split under 3,500 visible characters per message (plus a 12,000-character cap on the raw HTML); retries on network errors and HTTP 429
   - Jobs are marked as sent per message, right after it arrives (skipped jobs after the last one), so a failure halfway only resends what did not arrive; `--no-send` (dry run) and `--test-telegram` in `main.py`
   - Warning in the digest after 3 days without new jobs from the alerts
   - `--rebuild-db` keeps verdicts and sent status: restored by dedup key; jobs that no longer match are marked as sent only if all their emails were fully sent
-- [ ] **Phase 6:** Automate with GitHub Actions, plus a backup run
-  - `.github/workflows/daily.yml`: workflow_dispatch (called daily at 18:00 by cron-job.org) + schedule fallbacks at 20:23 and 21:23 Europe/Amsterdam; `permissions: contents: read`; no artifacts, no pull request triggers
+- [x] **Phase 6:** Automate with GitHub Actions, plus a backup run
+  - `.github/workflows/daily.yml`: schedule at 11:23 with a backup at 14:23 (Europe/Amsterdam), plus workflow_dispatch for manual runs; `permissions: contents: read`; no artifacts, no pull request triggers
   - Database kept in the Actions cache, encrypted with Fernet (`crypto_store.py`, secret `DB_ENCRYPTION_KEY`); restored and saved every run, also after a failure
   - State in the database: `processed_emails` (no re-extraction) and `meta.last_digest_date` (`--skip-if-sent-today`)
   - `--ci` prints only counts (public logs); `--mark-all-sent` for the first cloud run; profile from the `PROFILE_TEXT` secret
-- [ ] **Phase 7:** README, tests, LinkedIn post
+- [x] **Phase 7:** README, tests, LinkedIn post
+  - README for recruiters and developers (design decisions, known limitations, setup), MIT license
+  - `.github/workflows/tests.yml`: pytest on every push to main, status badge in the README
+  - Dependencies pinned with `~=` so updates cannot silently break the daily run
+
+## Possible next steps
+
+- Exact timing with an external trigger (e.g. cron-job.org calling the workflow_dispatch API), because GitHub's schedule can be hours late
+- Fuzzy deduplication: "Den Haag" vs "'s-Gravenhage", titles with "(m/v/x)", small spelling differences
+- More alert sites (more sources means better cross-site deduplication)
+- A weekly summary: number of jobs per site and verdict, best matches of the week
 
 ## What it shows on a CV
 
