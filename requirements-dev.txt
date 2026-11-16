@@ -1,0 +1,4 @@
+# Extra packages for development only (not needed for the daily run).
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest

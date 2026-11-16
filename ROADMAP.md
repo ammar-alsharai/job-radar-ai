@@ -70,14 +70,19 @@ Both Groq and Mistral work with the `openai` Python package by changing the base
 Claude Code writes the code and explains it; I review, understand every line, and make the commits myself.
 
 - [x] **Phase 0:** repo `job-radar-ai`, venv, folder structure, `.env.example`, `.gitignore`
-- [ ] **Phase 1:** `config.py` (load and check settings) + `email_reader.py` (read new emails via IMAP, save them raw in `data/raw/`)
-- [ ] **Phase 2:** AI extraction: email → structured job list (JSON) via Groq; add `openai` to requirements
+- [x] **Phase 1:** `config.py` (load and check settings) + `email_reader.py` (read new emails via IMAP, save them raw in `data/raw/`)
+- [x] **Phase 2:** AI extraction: email → structured job list (JSON) via Groq; add `openai` to requirements
   - `email_cleaner.py`: email → clean text; links become [L1]-style codes (URLs stay local), job-alerts address and name removed
   - `ai_client.py`: OpenAI-compatible client from `.env` (provider is config only), retries on rate limits
   - `extractor.py`: strict JSON schema request, validation, results cached in `data/extracted/<uid>.json`
 - [ ] **Phase 3:** SQLite storage and deduplication across sites
+  - `storage.py`: tables `jobs` (one row per unique job) and `sightings` (one row per email it appeared in)
+  - Readable dedup key `company|title|location` after normalizing (accents, punctuation, legal suffixes like B.V.); the link is added when the company is empty, so those jobs are never merged
+  - Dates come from the email's Date header; `--stats` and `--rebuild-db` (rebuild from `data/extracted/`) in `main.py`
+  - Tests in `tests/test_storage.py` (pytest, in `requirements-dev.txt`)
 - [ ] **Phase 4:** AI judging (🟢 match / 🟡 unclear / ❌ skip): junior? English? location? skill match?
 - [ ] **Phase 5:** Telegram digest, plus a warning after 3 days without alert emails
+  - Note: `--rebuild-db` will erase verdicts and notified_at; before Phase 5, make rebuild keep them or mark all rebuilt jobs as already notified, so old jobs are never re-sent.
 - [ ] **Phase 6:** Automate with GitHub Actions, plus a backup run
 - [ ] **Phase 7:** README, tests, LinkedIn post
 

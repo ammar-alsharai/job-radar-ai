@@ -16,8 +16,9 @@ UIDVALIDITY value, but Gmail practically never resets that for INBOX.)
 import email
 import imaplib
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from email.header import decode_header, make_header
+from email.utils import parsedate_to_datetime
 
 from job_radar import config
 
@@ -62,6 +63,22 @@ def read_headers(raw_bytes):
         "subject": decode_header_value(message["Subject"]),
         "date": decode_header_value(message["Date"]),
     }
+
+
+def get_email_date(raw_bytes):
+    """Return when the email was sent, in this computer's local time.
+
+    Falls back to "now" if the Date header is missing or unreadable.
+    """
+    message = email.message_from_bytes(raw_bytes)
+    date_header = message["Date"]
+    if date_header:
+        try:
+            # .astimezone() with no argument converts to the local time zone.
+            return parsedate_to_datetime(date_header).astimezone()
+        except (TypeError, ValueError):
+            logger.warning("Unreadable Date header, using the current time instead")
+    return datetime.now().astimezone()
 
 
 def fetch_recent_emails(days_back=1):

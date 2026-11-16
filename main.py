@@ -2,15 +2,20 @@
 
 Phase 1: read recent job-alert emails and save them to data/raw/.
 Phase 2: let the AI extract the jobs from each email (saved to data/extracted/).
+Phase 3: store the jobs in data/jobs.db and report which ones are new.
 
 Usage:
-    python main.py --days 3          read emails + extract jobs
+    python main.py --days 3          read emails, extract jobs, store them
     python main.py --days 3 --no-ai  only read emails (Phase 1)
     python main.py --preview 35      show what would be sent to the AI for email 35
+    python main.py --stats           show database statistics
+    python main.py --rebuild-db      rebuild data/jobs.db from data/extracted/
 """
 
 import argparse
+import json
 import logging
+import sqlite3
 import sys
 
 import openai
@@ -18,7 +23,7 @@ import openai
 
 def parse_args():
     """Read the command-line options."""
-    parser = argparse.ArgumentParser(description="Read job-alert emails and extract the jobs.")
+    parser = argparse.ArgumentParser(description="Read job-alert emails, extract and store the jobs.")
     parser.add_argument(
         "--days",
         type=int,
@@ -39,6 +44,22 @@ def parse_args():
         "--preview",
         metavar="UID",
         help="show the cleaned text of one saved email (no AI call, no Gmail)",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="show database statistics (no Gmail, no AI)",
+    )
+    parser.add_argument(
+        "--rebuild-db",
+        action="store_true",
+        help="delete data/jobs.db and rebuild it from data/extracted/ (no Gmail, no AI). "
+             "WARNING: this also erases verdicts and notified_at (Phase 4/5 data)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="show DEBUG log messages, including the text sent to the AI",
     )
     args = parser.parse_args()
     if args.days < 1:
@@ -79,14 +100,17 @@ def read_emails(days):
     return emails
 
 
-def extract_all(emails, use_cache=True):
-    """Phase 2: extract the jobs from every email and print them."""
+def extract_and_store(emails, use_cache=True):
+    """Phase 2 + 3: extract the jobs from every email, store them and print a report."""
     from job_radar import config
+    from job_radar.email_reader import get_email_date
     from job_radar.extractor import extract_jobs
+    from job_radar.storage import save_jobs
 
     print()
     print("Extracted jobs:")
     total = 0
+    new_jobs = []
     for item in emails:
         raw_bytes = (config.RAW_EMAIL_DIR / f"{item['uid']}.eml").read_bytes()
         jobs = extract_jobs(item["uid"], raw_bytes, use_cache=use_cache)
@@ -100,27 +124,91 @@ def extract_all(emails, use_cache=True):
                      job["language"], job["seniority"]]
             print("    " + " | ".join(part or "-" for part in parts))
 
+        # Save this email's jobs, dated by when the email was sent.
+        new_jobs += save_jobs(jobs, config.DB_PATH, seen_at=get_email_date(raw_bytes))
+
     print()
-    print(f"Total: {total} job(s) from {len(emails)} email(s).")
+    print(f"Extracted this run: {total} job(s) from {len(emails)} email(s): "
+          f"{len(new_jobs)} new, {total - len(new_jobs)} already known.")
+    if new_jobs:
+        print()
+        print("New jobs:")
+        for job in new_jobs:
+            parts = [job["title"], job["company"], job["location"]]
+            print("    " + " | ".join(part or "-" for part in parts))
+
+
+def uid_number(path):
+    """Sort helper: data/extracted/35.json -> 35 (so 9 comes before 10)."""
+    return int(path.stem)
+
+
+def rebuild_db():
+    """Delete the database and fill it again from the cached extractions."""
+    from job_radar import config
+    from job_radar.email_reader import get_email_date
+    from job_radar.storage import save_jobs
+
+    if config.DB_PATH.exists():
+        print(f"Deleting {config.DB_PATH.name} ...")
+        config.DB_PATH.unlink()
+
+    files = sorted(config.EXTRACTED_DIR.glob("*.json"), key=uid_number)
+    print(f"Rebuilding from {len(files)} file(s) in data/extracted/ (oldest email first) ...")
+    for path in files:
+        jobs = json.loads(path.read_text(encoding="utf-8"))
+        raw_path = config.RAW_EMAIL_DIR / f"{path.stem}.eml"
+        if raw_path.exists():
+            seen_at = get_email_date(raw_path.read_bytes())
+        else:
+            seen_at = None  # save_jobs() then uses the current time
+        save_jobs(jobs, config.DB_PATH, seen_at=seen_at)
+    print("Done.")
+
+
+def show_stats():
+    """Print the database statistics."""
+    from job_radar import config
+    from job_radar.storage import get_stats
+
+    stats = get_stats(config.DB_PATH)
+    print()
+    print(f"Jobs in database: {stats['total']}")
+    print(f"First seen today: {stats['first_seen_today']}")
+    print("Jobs per source:")
+    for source, count in stats["per_source"]:
+        print(f"    {source or '-'}: {count}")
 
 
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    if args.debug:
+        # Only our own modules (job_radar.*) go to DEBUG. Other packages such as
+        # openai stay at INFO: their DEBUG output is noisy and includes request details.
+        logging.getLogger("job_radar").setLevel(logging.DEBUG)
 
     # Every known problem prints one clear line instead of a traceback.
     # The order matters: Python uses the first "except" that matches.
     try:
         if args.preview:
             show_preview(args.preview)
-            return
-        emails = read_emails(args.days)
-        if not args.no_ai:
-            # --re-extract turns the cache off for this run.
-            extract_all(emails, use_cache=not args.re_extract)
+        elif args.stats:
+            show_stats()
+        elif args.rebuild_db:
+            rebuild_db()
+            show_stats()
+        else:
+            emails = read_emails(args.days)
+            if not args.no_ai:
+                # --re-extract turns the cache off for this run.
+                extract_and_store(emails, use_cache=not args.re_extract)
     except RuntimeError as error:
         # Our own messages: missing setting, Gmail login failed, ...
         print(f"Error: {error}")
+        sys.exit(1)
+    except sqlite3.Error as error:
+        print(f"Database error: {error}")
         sys.exit(1)
     except openai.AuthenticationError:
         print("AI login failed: check AI_API_KEY (and AI_BASE_URL) in .env.")

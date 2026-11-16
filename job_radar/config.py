@@ -64,3 +64,4 @@ def require_ai_settings():
 # Where data is saved (the data/ folder is gitignored)
 RAW_EMAIL_DIR = PROJECT_ROOT / "data" / "raw"
 EXTRACTED_DIR = PROJECT_ROOT / "data" / "extracted"
+DB_PATH = PROJECT_ROOT / "data" / "jobs.db"
