@@ -75,6 +75,25 @@ CREATE TABLE IF NOT EXISTS sightings (
 """
 
 
+# Emails whose extraction succeeded (Phase 6). On GitHub Actions there is no
+# data/extracted/ folder from earlier runs, so this table is how a run knows
+# an email was already done.
+CREATE_PROCESSED_EMAILS_TABLE = """
+CREATE TABLE IF NOT EXISTS processed_emails (
+    email_uid TEXT PRIMARY KEY,
+    processed_at TEXT NOT NULL
+)
+"""
+
+# Small key/value settings, e.g. last_digest_date = "2026-11-20".
+CREATE_META_TABLE = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+"""
+
+
 def connect(db_path):
     """Open the database (created if missing) and make sure the tables exist."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,6 +102,8 @@ def connect(db_path):
     with conn:
         conn.execute(CREATE_JOBS_TABLE)
         conn.execute(CREATE_SIGHTINGS_TABLE)
+        conn.execute(CREATE_PROCESSED_EMAILS_TABLE)
+        conn.execute(CREATE_META_TABLE)
     return conn
 
 
@@ -425,3 +446,74 @@ def restore_judgements(db_path, saved, notified_email_uids):
         conn.close()
 
     return restored, marked_as_sent, will_be_sent
+
+
+# --- Phase 6: state for runs on GitHub Actions --------------------------------
+
+def is_email_processed(db_path, email_uid):
+    """True if this email's extraction already succeeded in an earlier run."""
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM processed_emails WHERE email_uid = ?", (email_uid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
+def mark_email_processed(db_path, email_uid):
+    """Remember that this email's extraction succeeded (also with 0 jobs)."""
+    processed_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = connect(db_path)
+    try:
+        with conn:
+            # "OR REPLACE": if the UID is already there, just update the time.
+            conn.execute(
+                "INSERT OR REPLACE INTO processed_emails (email_uid, processed_at) VALUES (?, ?)",
+                (email_uid, processed_at),
+            )
+    finally:
+        conn.close()
+
+
+def get_meta(db_path, key):
+    """Return a stored setting (text), or None if it was never set."""
+    conn = connect(db_path)
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return row[0]
+
+
+def set_meta(db_path, key, value):
+    """Store a setting (text), replacing an older value."""
+    conn = connect(db_path)
+    try:
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+    finally:
+        conn.close()
+
+
+def mark_all_judged_notified(db_path):
+    """Mark every judged, unsent job as sent WITHOUT sending it. Returns the number.
+
+    Used once for the first cloud run, so old jobs are never sent.
+    """
+    notified_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = connect(db_path)
+    try:
+        with conn:
+            cursor = conn.execute(
+                """UPDATE jobs SET notified_at = ?
+                   WHERE verdict IS NOT NULL AND notified_at IS NULL""",
+                (notified_at,),
+            )
+            count = cursor.rowcount
+    finally:
+        conn.close()
+    return count

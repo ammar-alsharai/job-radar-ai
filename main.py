@@ -3,18 +3,23 @@
 Phase 1: read recent job-alert emails and save them to data/raw/.
 Phase 2: let the AI extract the jobs from each email (saved to data/extracted/).
 Phase 3: store the jobs in data/jobs.db and report which ones are new.
-Phase 4: let the AI judge every job that has no verdict yet (profile.txt).
+Phase 4: let the AI judge every job that has no verdict yet (profile).
 Phase 5: send the judged, not yet sent jobs as a Telegram digest.
+Phase 6: run daily on GitHub Actions (--ci, --skip-if-sent-today, encrypted database).
 
 Usage:
     python main.py --days 3          read emails, extract, store, judge, send digest
     python main.py --days 3 --no-send  same, but print the digest instead (dry run)
-    python main.py --test-telegram   send a test message to check the bot and chat id
     python main.py --days 3 --no-ai  only read emails (Phase 1)
+    python main.py --days 2 --ci --skip-if-sent-today   the daily cloud run
+    python main.py --days 2 --ci --mark-all-sent        the first cloud run
+    python main.py --test-telegram   send a test message to check the bot and chat id
     python main.py --preview 35      show what would be sent to the AI for email 35
     python main.py --stats           show database statistics
     python main.py --rebuild-db      rebuild data/jobs.db from data/extracted/
-    python main.py --rejudge         judge every job again (after changing profile.txt)
+    python main.py --rejudge         judge every job again (after changing the profile)
+    python main.py --encrypt-db      data/jobs.db -> data/jobs.db.enc
+    python main.py --decrypt-db      data/jobs.db.enc -> data/jobs.db
 """
 
 import argparse
@@ -23,13 +28,23 @@ import logging
 import sqlite3
 import sys
 import time
+from datetime import date
+from pathlib import Path
 
 import openai
+
+# The database files, for --encrypt-db and --decrypt-db. These must match
+# config.DB_PATH. They are defined here instead of importing config, because
+# config requires the Gmail settings, and the encrypt/decrypt steps of the
+# workflow only get DB_ENCRYPTION_KEY.
+PROJECT_ROOT = Path(__file__).resolve().parent
+DB_FILE = PROJECT_ROOT / "data" / "jobs.db"
+ENCRYPTED_DB_FILE = PROJECT_ROOT / "data" / "jobs.db.enc"
 
 
 def parse_args():
     """Read the command-line options."""
-    parser = argparse.ArgumentParser(description="Read job-alert emails, extract and store the jobs.")
+    parser = argparse.ArgumentParser(description="Read job-alert emails, extract, judge and send the jobs.")
     parser.add_argument(
         "--days",
         type=int,
@@ -44,7 +59,7 @@ def parse_args():
     parser.add_argument(
         "--re-extract",
         action="store_true",
-        help="ignore saved results in data/extracted/ and ask the AI again (overwrites them)",
+        help="ignore saved results and already-processed emails, ask the AI again",
     )
     parser.add_argument(
         "--preview",
@@ -78,15 +93,70 @@ def parse_args():
         help="send a test message to Telegram and stop",
     )
     parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="public-log mode: print only counts (no senders, subjects, titles, reasons or links)",
+    )
+    parser.add_argument(
+        "--skip-if-sent-today",
+        action="store_true",
+        help="stop right away if today's digest was already sent",
+    )
+    parser.add_argument(
+        "--mark-all-sent",
+        action="store_true",
+        help="read, extract, store and judge, then mark every judged job as sent WITHOUT sending",
+    )
+    parser.add_argument(
+        "--encrypt-db",
+        action="store_true",
+        help="encrypt data/jobs.db to data/jobs.db.enc (needs DB_ENCRYPTION_KEY)",
+    )
+    parser.add_argument(
+        "--decrypt-db",
+        action="store_true",
+        help="decrypt data/jobs.db.enc to data/jobs.db (needs DB_ENCRYPTION_KEY)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
-        help="show DEBUG log messages, including the text sent to the AI",
+        help="show DEBUG log messages, including the text sent to the AI (ignored with --ci)",
     )
     args = parser.parse_args()
     if args.days < 1:
         parser.error("--days must be 1 or more")
     return args
 
+
+# --- encryption (Phase 6) ------------------------------------------------------
+
+def encrypt_db():
+    """data/jobs.db -> data/jobs.db.enc with the key in DB_ENCRYPTION_KEY."""
+    from dotenv import load_dotenv
+
+    from job_radar.crypto_store import encrypt_file, get_key
+
+    load_dotenv(PROJECT_ROOT / ".env")  # locally the key may be in .env
+    if not DB_FILE.exists():
+        raise RuntimeError("data/jobs.db not found: nothing to encrypt")
+    encrypt_file(DB_FILE, ENCRYPTED_DB_FILE, get_key())
+    print("Encrypted data/jobs.db to data/jobs.db.enc.")
+
+
+def decrypt_db():
+    """data/jobs.db.enc -> data/jobs.db with the key in DB_ENCRYPTION_KEY."""
+    from dotenv import load_dotenv
+
+    from job_radar.crypto_store import decrypt_file, get_key
+
+    load_dotenv(PROJECT_ROOT / ".env")
+    if not ENCRYPTED_DB_FILE.exists():
+        raise RuntimeError("data/jobs.db.enc not found: nothing to decrypt")
+    decrypt_file(ENCRYPTED_DB_FILE, DB_FILE, get_key())
+    print("Decrypted data/jobs.db.enc to data/jobs.db.")
+
+
+# --- the pipeline ----------------------------------------------------------------
 
 def show_preview(uid):
     """Print exactly the text that would be sent to the AI, plus the link codes."""
@@ -104,13 +174,17 @@ def show_preview(uid):
     print(f"--- {len(text)} characters, {len(links)} link codes: {', '.join(links)}")
 
 
-def read_emails(days):
+def read_emails(days, ci=False):
     """Phase 1: fetch emails, save new ones and print a summary. Returns the list."""
     from job_radar.email_reader import fetch_recent_emails
 
     emails = fetch_recent_emails(days_back=days)
     new_count = sum(1 for item in emails if item["is_new"])
     old_count = len(emails) - new_count
+
+    if ci:
+        print(f"Emails read: {len(emails)} (new: {new_count})")
+        return emails
 
     print()
     print(f"Found {len(emails)} emails from the last {days} day(s): "
@@ -121,36 +195,61 @@ def read_emails(days):
     return emails
 
 
-def extract_and_store(emails, use_cache=True):
-    """Phase 2 + 3: extract the jobs from every email, store them and print a report."""
+def extract_and_store(emails, use_cache=True, ci=False):
+    """Phase 2 + 3: extract the jobs from every email that is not done yet, store them."""
     from job_radar import config
     from job_radar.email_reader import get_email_date
     from job_radar.extractor import extract_jobs
-    from job_radar.storage import save_jobs
+    from job_radar.storage import is_email_processed, mark_email_processed, save_jobs
 
-    print()
-    print("Extracted jobs:")
+    if not ci:
+        print()
+        print("Extracted jobs:")
     total = 0
     new_jobs = []
+    skipped = 0
+    failed = 0
     for item in emails:
+        # Already done in an earlier run (also on GitHub Actions, where the
+        # data/extracted/ files of earlier runs do not exist): skip it.
+        if use_cache and is_email_processed(config.DB_PATH, item["uid"]):
+            skipped += 1
+            continue
+
         raw_bytes = (config.RAW_EMAIL_DIR / f"{item['uid']}.eml").read_bytes()
         jobs = extract_jobs(item["uid"], raw_bytes, use_cache=use_cache)
+        if jobs is None:
+            failed += 1  # invalid AI answer: not marked, tried again next run
+            continue
         total += len(jobs)
 
-        print()
-        print(f"{item['from']}: {len(jobs)} job(s)")
-        for job in jobs:
-            # Show "-" for empty fields so the columns stay readable.
-            parts = [job["title"], job["company"], job["location"],
-                     job["language"], job["seniority"]]
-            print("    " + " | ".join(part or "-" for part in parts))
+        if not ci:
+            print()
+            print(f"{item['from']}: {len(jobs)} job(s)")
+            for job in jobs:
+                # Show "-" for empty fields so the columns stay readable.
+                parts = [job["title"], job["company"], job["location"],
+                         job["language"], job["seniority"]]
+                print("    " + " | ".join(part or "-" for part in parts))
 
-        # Save this email's jobs, dated by when the email was sent.
+        # Save this email's jobs, dated by when the email was sent, and only
+        # then mark the email as done.
         new_jobs += save_jobs(jobs, config.DB_PATH, seen_at=get_email_date(raw_bytes))
+        mark_email_processed(config.DB_PATH, item["uid"])
+
+    if ci:
+        print(f"Emails extracted: {len(emails) - skipped - failed} "
+              f"(already done: {skipped}, failed: {failed})")
+        print(f"Jobs extracted: {total} (new: {len(new_jobs)})")
+        return
 
     print()
-    print(f"Extracted this run: {total} job(s) from {len(emails)} email(s): "
+    print(f"Extracted this run: {total} job(s) from {len(emails) - skipped - failed} email(s): "
           f"{len(new_jobs)} new, {total - len(new_jobs)} already known.")
+    if skipped:
+        print(f"Skipped {skipped} email(s) that were already processed.")
+    if failed:
+        print(f"{failed} email(s) got an invalid AI answer; they are retried next run.")
     if new_jobs:
         print()
         print("New jobs:")
@@ -168,7 +267,12 @@ def rebuild_db():
     """Delete the database and fill it again from the cached extractions."""
     from job_radar import config
     from job_radar.email_reader import get_email_date
-    from job_radar.storage import export_judgements, restore_judgements, save_jobs
+    from job_radar.storage import (
+        export_judgements,
+        mark_email_processed,
+        restore_judgements,
+        save_jobs,
+    )
 
     # Remember verdicts and sent status BEFORE deleting anything.
     saved, notified_email_uids = export_judgements(config.DB_PATH)
@@ -186,6 +290,7 @@ def rebuild_db():
         else:
             seen_at = None  # save_jobs() then uses the current time
         save_jobs(jobs, config.DB_PATH, seen_at=seen_at)
+        mark_email_processed(config.DB_PATH, path.stem)
 
     restored, marked, new = restore_judgements(config.DB_PATH, saved, notified_email_uids)
     print(f"Restored {restored}, marked {marked} as already sent, {new} will be sent as new.")
@@ -194,27 +299,37 @@ def rebuild_db():
 VERDICT_LABELS = [("match", "🟢 match"), ("unclear", "🟡 unclear"), ("skip", "❌ skip")]
 
 
-def judge_all():
+def judge_all(ci=False):
     """Phase 4: judge every job without a verdict and print them grouped by verdict."""
     from job_radar import config
     from job_radar.judge import judge_job, load_profile
     from job_radar.storage import get_unjudged_jobs, save_verdict
 
     jobs = get_unjudged_jobs(config.DB_PATH)
-    print()
-    print(f"Judging {len(jobs)} job(s) without a verdict ...")
+    if not ci:
+        print()
+        print(f"Judging {len(jobs)} job(s) without a verdict ...")
+    judged = {"match": [], "unclear": [], "skip": []}
+
+    if jobs:
+        profile = load_profile()  # only needed when there is something to judge
+        for job in jobs:
+            result = judge_job(job, profile)
+            if result is None:
+                continue  # invalid answer: stays unjudged, tried again next run
+            # Saved right away, so a stop halfway (e.g. rate limit) loses nothing.
+            save_verdict(config.DB_PATH, job["id"], result)
+            judged[result["verdict"]].append((job, result["reason"]))
+
+    not_judged = len(jobs) - sum(len(items) for items in judged.values())
+
+    if ci:
+        print(f"Jobs judged: {len(jobs) - not_judged} (match: {len(judged['match'])}, "
+              f"unclear: {len(judged['unclear'])}, skip: {len(judged['skip'])}, "
+              f"failed: {not_judged})")
+        return
     if not jobs:
         return
-
-    profile = load_profile()  # only needed when there is something to judge
-    judged = {"match": [], "unclear": [], "skip": []}
-    for job in jobs:
-        result = judge_job(job, profile)
-        if result is None:
-            continue  # invalid answer: stays unjudged, tried again next run
-        # Saved right away, so a stop halfway (e.g. rate limit) loses nothing.
-        save_verdict(config.DB_PATH, job["id"], result)
-        judged[result["verdict"]].append((job, result["reason"]))
 
     for verdict, label in VERDICT_LABELS:
         print()
@@ -223,7 +338,6 @@ def judge_all():
             parts = [job["title"], job["company"], job["location"]]
             print("    " + " | ".join(part or "-" for part in parts) + f" — {reason}")
 
-    not_judged = len(jobs) - sum(len(items) for items in judged.values())
     if not_judged:
         print()
         print(f"{not_judged} job(s) could not be judged (invalid AI answer); they are retried next run.")
@@ -235,14 +349,14 @@ def rejudge_all():
     from job_radar.judge import load_profile
     from job_radar.storage import clear_verdicts
 
-    # Check profile.txt BEFORE clearing, so a missing profile never wipes the verdicts.
+    # Check the profile BEFORE clearing, so a missing profile never wipes the verdicts.
     load_profile()
     count = clear_verdicts(config.DB_PATH)
     print(f"Re-judging {count} job(s): all verdicts cleared.")
     judge_all()
 
 
-def send_digest(dry_run=False):
+def send_digest(dry_run=False, ci=False):
     """Phase 5: send all judged, not yet sent jobs to Telegram, then mark them as sent.
 
     dry_run=True prints the digest instead and marks nothing.
@@ -254,7 +368,12 @@ def send_digest(dry_run=False):
         build_messages,
         send_message,
     )
-    from job_radar.storage import days_since_last_sighting, get_unnotified_jobs, mark_notified
+    from job_radar.storage import (
+        days_since_last_sighting,
+        get_unnotified_jobs,
+        mark_notified,
+        set_meta,
+    )
 
     jobs = get_unnotified_jobs(config.DB_PATH)
     match_jobs = [job for job in jobs if job["verdict"] == "match"]
@@ -269,8 +388,11 @@ def send_digest(dry_run=False):
 
     messages = build_messages(match_jobs, unclear_jobs, skip_count, warning=warning)
 
-    print()
     if dry_run:
+        if ci:
+            print(f"Dry run: {len(messages)} Telegram message(s) built, nothing sent")
+            return
+        print()
         for number, message in enumerate(messages, start=1):
             print(f"--- Telegram message {number} of {len(messages)} ---")
             print(message["text"])
@@ -291,9 +413,48 @@ def send_digest(dry_run=False):
         mark_notified(config.DB_PATH, message["job_ids"])
 
     # Skipped jobs are only counted in the header, so mark them once every
-    # message has arrived.
+    # message has arrived. Then remember that today's digest is done.
     mark_notified(config.DB_PATH, skip_ids)
-    print(f"Sent {len(messages)} Telegram message(s); {len(jobs)} job(s) marked as sent.")
+    set_meta(config.DB_PATH, "last_digest_date", date.today().isoformat())
+
+    if ci:
+        print(f"Telegram messages sent: {len(messages)}")
+    else:
+        print()
+        print(f"Sent {len(messages)} Telegram message(s); {len(jobs)} job(s) marked as sent.")
+
+
+def mark_all_sent():
+    """First cloud run: mark every judged job as sent without sending anything."""
+    from job_radar import config
+    from job_radar.storage import mark_all_judged_notified
+
+    count = mark_all_judged_notified(config.DB_PATH)
+    print(f"Marked {count} job(s) as sent without sending.")
+
+
+def run_pipeline(args):
+    """The normal run: read -> extract -> store -> judge -> send (or mark all sent)."""
+    from job_radar import config
+    from job_radar.storage import get_meta
+
+    if args.skip_if_sent_today:
+        # date.today() follows the computer's time zone; the workflow sets
+        # TZ=Europe/Amsterdam, so this is the Amsterdam date there too.
+        if get_meta(config.DB_PATH, "last_digest_date") == date.today().isoformat():
+            print("Digest already sent today.")
+            return
+
+    emails = read_emails(args.days, ci=args.ci)
+    if args.no_ai:
+        return
+    # --re-extract turns the cache and the processed-emails check off for this run.
+    extract_and_store(emails, use_cache=not args.re_extract, ci=args.ci)
+    judge_all(ci=args.ci)
+    if args.mark_all_sent:
+        mark_all_sent()  # note: does NOT set last_digest_date
+    else:
+        send_digest(dry_run=args.no_send, ci=args.ci)
 
 
 def test_telegram():
@@ -321,25 +482,37 @@ def show_stats():
         print(f"    {verdict or 'not judged yet'}: {count}")
 
 
-def main():
-    args = parse_args()
+def setup_logging(args):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # The HTTP library and the openai package log every request and every
     # automatic retry at INFO level. Only show their warnings and errors, so
-    # the output (public on GitHub Actions later) stays short. "httpx2" is the
-    # name the HTTP library uses in our installed version; "httpx" covers the
-    # original library name in case that is installed instead.
+    # the output stays short. "httpx2" is the name the HTTP library uses in
+    # our installed version; "httpx" covers the original library name.
     for noisy_logger in ["httpx", "httpx2", "openai"]:
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
-    if args.debug:
+
+    if args.ci:
+        # Public logs: our own modules only show warnings (which contain only
+        # UIDs, job ids and numbers), never the INFO/DEBUG details.
+        logging.getLogger("job_radar").setLevel(logging.WARNING)
+    elif args.debug:
         # Only our own modules (job_radar.*) go to DEBUG. Other packages such as
-        # openai stay at INFO: their DEBUG output is noisy and includes request details.
+        # openai stay quiet: their DEBUG output is noisy and includes request details.
         logging.getLogger("job_radar").setLevel(logging.DEBUG)
+
+
+def main():
+    args = parse_args()
+    setup_logging(args)
 
     # Every known problem prints one clear line instead of a traceback.
     # The order matters: Python uses the first "except" that matches.
     try:
-        if args.test_telegram:
+        if args.encrypt_db:
+            encrypt_db()
+        elif args.decrypt_db:
+            decrypt_db()
+        elif args.test_telegram:
             test_telegram()
         elif args.preview:
             show_preview(args.preview)
@@ -351,12 +524,7 @@ def main():
         elif args.rejudge:
             rejudge_all()
         else:
-            emails = read_emails(args.days)
-            if not args.no_ai:
-                # --re-extract turns the cache off for this run.
-                extract_and_store(emails, use_cache=not args.re_extract)
-                judge_all()
-                send_digest(dry_run=args.no_send)
+            run_pipeline(args)
     except RuntimeError as error:
         # Our own messages: missing setting, Gmail login failed, ...
         print(f"Error: {error}")

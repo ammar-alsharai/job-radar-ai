@@ -17,3 +17,5 @@ os.environ["AI_REASONING_EFFORT"] = ""
 os.environ["MY_NAME"] = ""
 os.environ["TELEGRAM_BOT_TOKEN"] = "123456:dummy-secret-token"
 os.environ["TELEGRAM_CHAT_ID"] = "1"
+os.environ["PROFILE_TEXT"] = ""         # tests set their own profile when they need one
+os.environ["DB_ENCRYPTION_KEY"] = ""    # tests use their own generated keys

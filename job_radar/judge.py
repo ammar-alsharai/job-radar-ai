@@ -19,6 +19,7 @@ answer only affects one job, and the AI cannot mix up details between jobs.
 
 import json
 import logging
+import os
 
 from job_radar import config
 from job_radar.ai_client import get_client
@@ -78,17 +79,27 @@ reason: one short English sentence (max 120 characters) explaining the most impo
 
 
 def load_profile():
-    """Read profile.txt, without comment lines. Stops with a clear error if it is missing."""
-    if not config.PROFILE_PATH.exists():
-        raise RuntimeError(
-            "profile.txt not found: copy profile.example.txt to profile.txt and fill it in"
-        )
+    """Return my profile, without comment lines and empty lines.
+
+    Uses the PROFILE_TEXT environment variable if it is set (on GitHub Actions
+    it comes from a secret), otherwise profile.txt. Stops with a clear error if
+    neither exists. The profile is never logged at INFO level.
+    """
+    profile_text = os.getenv("PROFILE_TEXT", "").strip()
+    if not profile_text:
+        if not config.PROFILE_PATH.exists():
+            raise RuntimeError(
+                "No profile found: set PROFILE_TEXT, or copy profile.example.txt "
+                "to profile.txt and fill it in"
+            )
+        profile_text = config.PROFILE_PATH.read_text(encoding="utf-8")
+
     lines = []
-    for line in config.PROFILE_PATH.read_text(encoding="utf-8").splitlines():
+    for line in profile_text.splitlines():
         if line.strip() and not line.strip().startswith("#"):
             lines.append(line.strip())
     if not lines:
-        raise RuntimeError("profile.txt is empty: describe your target roles and skills in it")
+        raise RuntimeError("The profile is empty: describe your target roles and skills in it")
     return "\n".join(lines)
 
 

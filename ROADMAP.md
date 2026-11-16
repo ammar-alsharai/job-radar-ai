@@ -1,6 +1,6 @@
 # Job Radar AI – Roadmap
 
-An AI agent that runs every morning without being asked: it reads the job-alert emails that arrived overnight, uses AI to turn them into one clean list, removes duplicates, judges each job against what I'm looking for, stores everything, and sends me one Telegram digest.
+An AI agent that runs every evening without being asked: it reads the job-alert emails that arrived that day, uses AI to turn them into one clean list, removes duplicates, judges each job against what I'm looking for, stores everything, and sends me one Telegram digest.
 
 **Target roles:** junior data engineer, Python/backend developer, software engineer, data analyst.
 **Area:** Den Haag and Zuid-Holland (max 1 hour travel) or remote. English as working language first.
@@ -8,7 +8,7 @@ An AI agent that runs every morning without being asked: it reads the job-alert 
 ## Pipeline
 
 1. Job sites send alert emails to a dedicated job-alerts Gmail.
-2. GitHub Actions starts the agent every morning.
+2. GitHub Actions starts the agent every evening at 18:00 (triggered by cron-job.org; GitHub's schedule as fallback).
 3. Read new emails with IMAP (`imaplib`) and save them raw.
 4. The AI (Groq) extracts each job into structured JSON: title, company, location, language, seniority, link.
 5. Deduplicate across sites and store in SQLite.
@@ -52,7 +52,8 @@ Both Groq and Mistral work with the `openai` Python package by changing the base
 | No forwarding from the personal Gmail, no second LinkedIn account | My choice / LinkedIn forbids fake accounts |
 | Provider-independent AI layer | Free tiers change; the provider is config only |
 | Broad alerts, strict AI filtering | Keeps volume up; the AI does the narrowing |
-| Backup scheduled run | GitHub can skip scheduled runs; the second run skips itself if the first ran |
+| External trigger + backup schedule | GitHub's schedule is often hours late or skipped: cron-job.org starts the run at 18:00 via the API, GitHub's schedule (20:23, 21:23) is the fallback; later runs skip themselves if the digest was sent |
+| Encrypted database in the Actions cache | The repo is public: caches are readable from pull requests and logs are public, so the DB is cached only encrypted and cloud runs print only counts |
 | No personal details sent to the AI | A short skills summary instead of the full CV |
 | Secrets only in `.env` and GitHub Secrets | Never in code, chats or commits |
 | `CLAUDE.md` stays local (gitignored) | I commit and push my own work |
@@ -90,6 +91,10 @@ Claude Code writes the code and explains it; I review, understand every line, an
   - Warning in the digest after 3 days without new jobs from the alerts
   - `--rebuild-db` keeps verdicts and sent status: restored by dedup key; jobs that no longer match are marked as sent only if all their emails were fully sent
 - [ ] **Phase 6:** Automate with GitHub Actions, plus a backup run
+  - `.github/workflows/daily.yml`: workflow_dispatch (called daily at 18:00 by cron-job.org) + schedule fallbacks at 20:23 and 21:23 Europe/Amsterdam; `permissions: contents: read`; no artifacts, no pull request triggers
+  - Database kept in the Actions cache, encrypted with Fernet (`crypto_store.py`, secret `DB_ENCRYPTION_KEY`); restored and saved every run, also after a failure
+  - State in the database: `processed_emails` (no re-extraction) and `meta.last_digest_date` (`--skip-if-sent-today`)
+  - `--ci` prints only counts (public logs); `--mark-all-sent` for the first cloud run; profile from the `PROFILE_TEXT` secret
 - [ ] **Phase 7:** README, tests, LinkedIn post
 
 ## What it shows on a CV

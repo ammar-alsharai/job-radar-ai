@@ -176,7 +176,11 @@ def get_valid_answer(uid, text):
 
 
 def extract_jobs(uid, raw_bytes, use_cache=True):
-    """Return the jobs in one email as a list of dicts.
+    """Return the jobs in one email as a list of dicts (possibly empty).
+
+    Returns None if the AI answer was invalid: then the email is not done and
+    is tried again on the next run. (An empty list means "valid answer, no jobs",
+    e.g. a confirmation email.)
 
     Results are saved to data/extracted/<uid>.json. If that file already exists
     (and use_cache is True), it is loaded instead of calling the AI again.
@@ -194,7 +198,7 @@ def extract_jobs(uid, raw_bytes, use_cache=True):
     logger.debug("Text sent to the AI for UID %s:\n%s", uid, text)
     first = get_valid_answer(uid, text)
     if first is None:
-        return []
+        return None  # invalid answer: not saved, tried again next run
     raw_jobs, listings_seen = first
 
     # Completeness check: the AI counted more listings than it returned.
