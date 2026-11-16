@@ -19,9 +19,9 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "23 20 * * *"
+    - cron: "23 11 * * *"
       timezone: "Europe/Amsterdam"
-    - cron: "23 21 * * *"
+    - cron: "23 14 * * *"
       timezone: "Europe/Amsterdam"
 
 # The workflow only needs to read the code.
