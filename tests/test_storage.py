@@ -13,6 +13,10 @@ from datetime import datetime
 
 from job_radar.storage import (
     clear_verdicts,
+    export_judgements,
+    get_unnotified_jobs,
+    mark_notified,
+    restore_judgements,
     get_unjudged_jobs,
     make_dedup_key,
     normalize,
@@ -181,3 +185,79 @@ def test_verdicts_are_saved_and_cleared(tmp_path):
 
     assert clear_verdicts(db_path) == 2
     assert len(get_unjudged_jobs(db_path)) == 2
+
+
+# --- notifications and rebuild (Phase 5) --------------------------------------
+
+def judge(db_path, job_id, verdict="match"):
+    result = {"junior_ok": "yes", "english_ok": "yes", "location_ok": "yes",
+              "skills_ok": "yes", "reason": "Good fit.", "verdict": verdict}
+    save_verdict(db_path, job_id, result)
+
+
+def test_only_judged_unnotified_jobs_are_returned(tmp_path):
+    db_path = tmp_path / "jobs.db"
+    save_jobs([make_job("101"), make_job("101", location="Den Haag")], db_path)
+    first_id = get_unjudged_jobs(db_path)[0]["id"]
+    judge(db_path, first_id)
+
+    unnotified = get_unnotified_jobs(db_path)
+    assert [job["id"] for job in unnotified] == [first_id]   # the unjudged job waits
+    assert unnotified[0]["judge_checks"]["skills_ok"] == "yes"
+
+    mark_notified(db_path, [first_id])
+    assert get_unnotified_jobs(db_path) == []
+
+
+def rebuild(db_path, emails):
+    """Like main.rebuild_db(): export, delete, save the emails again, restore."""
+    saved, notified_uids = export_judgements(db_path)
+    db_path.unlink()
+    for jobs in emails:
+        save_jobs(jobs, db_path)
+    return restore_judgements(db_path, saved, notified_uids)
+
+
+def test_rebuild_keeps_verdicts_and_notified_at(tmp_path):
+    db_path = tmp_path / "jobs.db"
+    emails = [[make_job("101")], [make_job("102", title="Data Analyst")]]
+    for jobs in emails:
+        save_jobs(jobs, db_path)
+    for job in get_unjudged_jobs(db_path):
+        judge(db_path, job["id"], verdict="unclear")
+    sent_id = get_unnotified_jobs(db_path)[0]["id"]
+    mark_notified(db_path, [sent_id])
+
+    restored, marked, new = rebuild(db_path, emails)
+
+    assert (restored, marked, new) == (2, 0, 0)
+    assert get_unjudged_jobs(db_path) == []                    # verdicts are back
+    assert len(get_unnotified_jobs(db_path)) == 1              # one was sent, one not
+
+
+def test_rebuild_marks_unmatched_jobs_only_from_fully_notified_emails(tmp_path):
+    db_path = tmp_path / "jobs.db"
+    # Email 101: one job, sent.  Email 102: two jobs, only one of them sent.
+    save_jobs([make_job("101", title="Sent Job")], db_path)
+    save_jobs([make_job("102", title="Also Sent"), make_job("102", title="Not Sent")], db_path)
+    for job in get_unjudged_jobs(db_path):
+        judge(db_path, job["id"])
+    ids = {job["title"]: job["id"] for job in get_unnotified_jobs(db_path)}
+    mark_notified(db_path, [ids["Sent Job"], ids["Also Sent"]])
+
+    # New dedup rules (simulated by changed titles): no key matches any more.
+    restored, marked, new = rebuild(db_path, [
+        [make_job("101", title="Sent Job (new key)")],
+        [make_job("102", title="Also Sent (new key)"), make_job("102", title="Not Sent (new key)")],
+    ])
+
+    assert restored == 0
+    assert marked == 1   # only the job from email 101, which was fully notified
+    assert new == 2      # email 102 had an unsent job, so its jobs are not marked
+    conn = sqlite3.connect(db_path)
+    try:
+        notified_titles = [row[0] for row in conn.execute(
+            "SELECT title FROM jobs WHERE notified_at IS NOT NULL")]
+    finally:
+        conn.close()
+    assert notified_titles == ["Sent Job (new key)"]

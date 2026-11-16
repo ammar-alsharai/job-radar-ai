@@ -271,3 +271,157 @@ def get_stats(db_path):
         "first_seen_today": first_seen_today,
         "per_verdict": per_verdict,
     }
+
+
+# --- Phase 5: notifications ----------------------------------------------------
+
+def get_unnotified_jobs(db_path):
+    """Return judged jobs that were not sent yet, as a list of dicts.
+
+    Jobs without a verdict are left out: they wait until the next run judges them.
+    judge_checks is turned back from JSON text into a dict.
+    """
+    conn = connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """SELECT id, title, company, location, link, first_seen,
+                      verdict, verdict_reason, judge_checks
+               FROM jobs
+               WHERE verdict IS NOT NULL AND notified_at IS NULL
+               ORDER BY id"""
+        ).fetchall()
+    finally:
+        conn.close()
+
+    jobs = []
+    for row in rows:
+        job = dict(row)
+        job["judge_checks"] = json.loads(job["judge_checks"] or "{}")
+        jobs.append(job)
+    return jobs
+
+
+def mark_notified(db_path, job_ids):
+    """Set notified_at to now for the given job ids."""
+    notified_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn = connect(db_path)
+    try:
+        with conn:
+            for job_id in job_ids:
+                conn.execute("UPDATE jobs SET notified_at = ? WHERE id = ?", (notified_at, job_id))
+    finally:
+        conn.close()
+
+
+def days_since_last_sighting(db_path):
+    """Days since the newest email that contained a job, or None if there are no jobs."""
+    conn = connect(db_path)
+    try:
+        newest = conn.execute("SELECT MAX(last_seen) FROM jobs").fetchone()[0]
+    finally:
+        conn.close()
+    if newest is None:
+        return None
+    return (date.today() - date.fromisoformat(newest)).days
+
+
+# --- keeping verdicts when the database is rebuilt -----------------------------
+
+def export_judgements(db_path):
+    """Remember verdicts and notifications before the database is deleted.
+
+    Returns two things:
+    - saved: {dedup_key: {"verdict": ..., "verdict_reason": ..., "judge_checks": ...,
+              "judged_at": ..., "notified_at": ...}}
+    - notified_email_uids: the set of email UIDs whose jobs were ALL notified.
+    """
+    if not db_path.exists():
+        return {}, set()
+
+    conn = connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        job_rows = conn.execute(
+            """SELECT dedup_key, verdict, verdict_reason, judge_checks, judged_at, notified_at
+               FROM jobs"""
+        ).fetchall()
+        sighting_rows = conn.execute(
+            """SELECT sightings.email_uid, jobs.notified_at
+               FROM sightings JOIN jobs ON jobs.id = sightings.job_id"""
+        ).fetchall()
+    finally:
+        conn.close()
+
+    saved = {}
+    for row in job_rows:
+        saved[row["dedup_key"]] = {
+            "verdict": row["verdict"],
+            "verdict_reason": row["verdict_reason"],
+            "judge_checks": row["judge_checks"],
+            "judged_at": row["judged_at"],
+            "notified_at": row["notified_at"],
+        }
+
+    # An email counts as "fully notified" only if NONE of its jobs is unnotified.
+    all_uids = set()
+    uids_with_unnotified_job = set()
+    for row in sighting_rows:
+        all_uids.add(row["email_uid"])
+        if row["notified_at"] is None:
+            uids_with_unnotified_job.add(row["email_uid"])
+    notified_email_uids = all_uids - uids_with_unnotified_job
+
+    return saved, notified_email_uids
+
+
+def restore_judgements(db_path, saved, notified_email_uids):
+    """Put remembered verdicts back after a rebuild.
+
+    For each job in the rebuilt database:
+    - its dedup_key is in saved -> restore verdict, reason, checks, judged_at, notified_at;
+    - otherwise (e.g. the dedup rules changed), if ALL its sightings come from
+      fully-notified emails -> it was surely sent before under another key, so
+      mark it as notified (it is never sent again);
+    - otherwise leave it alone: it will be judged and sent as new.
+
+    Returns (restored, marked_as_sent, will_be_sent_as_new).
+    """
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    restored = 0
+    marked_as_sent = 0
+    will_be_sent = 0
+
+    conn = connect(db_path)
+    try:
+        with conn:
+            job_rows = conn.execute("SELECT id, dedup_key FROM jobs").fetchall()
+            for job_id, dedup_key in job_rows:
+                if dedup_key in saved:
+                    old = saved[dedup_key]
+                    conn.execute(
+                        """UPDATE jobs SET verdict = ?, verdict_reason = ?, judge_checks = ?,
+                                           judged_at = ?, notified_at = ?
+                           WHERE id = ?""",
+                        (old["verdict"], old["verdict_reason"], old["judge_checks"],
+                         old["judged_at"], old["notified_at"], job_id),
+                    )
+                    restored += 1
+                    continue
+
+                email_uids = set()
+                for (email_uid,) in conn.execute(
+                    "SELECT email_uid FROM sightings WHERE job_id = ?", (job_id,)
+                ):
+                    email_uids.add(email_uid)
+
+                # issubset: every UID in email_uids is also in notified_email_uids.
+                if email_uids and email_uids.issubset(notified_email_uids):
+                    conn.execute("UPDATE jobs SET notified_at = ? WHERE id = ?", (now, job_id))
+                    marked_as_sent += 1
+                else:
+                    will_be_sent += 1
+    finally:
+        conn.close()
+
+    return restored, marked_as_sent, will_be_sent

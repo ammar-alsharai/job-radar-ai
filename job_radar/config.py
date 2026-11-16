@@ -61,6 +61,21 @@ def require_ai_settings():
             raise RuntimeError(f"Missing setting: {key} is not set or empty in .env")
 
 
+# Telegram settings (Phase 5). May be empty here; require_telegram_settings() checks them.
+TELEGRAM_BOT_TOKEN = _optional("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = _optional("TELEGRAM_CHAT_ID")
+
+
+def require_telegram_settings():
+    """Stop with a clear error if a Telegram setting is missing (names the KEY only).
+
+    Call this right before sending, so a dry run (--no-send) works without them.
+    """
+    for key in ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]:
+        if not _optional(key):
+            raise RuntimeError(f"Missing setting: {key} is not set or empty in .env")
+
+
 # Where data is saved (the data/ folder is gitignored)
 RAW_EMAIL_DIR = PROJECT_ROOT / "data" / "raw"
 EXTRACTED_DIR = PROJECT_ROOT / "data" / "extracted"

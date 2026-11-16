@@ -15,3 +15,5 @@ os.environ["AI_BASE_URL"] = "http://127.0.0.1:9/v1"  # nothing listens here: no 
 os.environ["AI_MODEL"] = "dummy-model"
 os.environ["AI_REASONING_EFFORT"] = ""
 os.environ["MY_NAME"] = ""
+os.environ["TELEGRAM_BOT_TOKEN"] = "123456:dummy-secret-token"
+os.environ["TELEGRAM_CHAT_ID"] = "1"

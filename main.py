@@ -4,9 +4,12 @@ Phase 1: read recent job-alert emails and save them to data/raw/.
 Phase 2: let the AI extract the jobs from each email (saved to data/extracted/).
 Phase 3: store the jobs in data/jobs.db and report which ones are new.
 Phase 4: let the AI judge every job that has no verdict yet (profile.txt).
+Phase 5: send the judged, not yet sent jobs as a Telegram digest.
 
 Usage:
-    python main.py --days 3          read emails, extract, store and judge jobs
+    python main.py --days 3          read emails, extract, store, judge, send digest
+    python main.py --days 3 --no-send  same, but print the digest instead (dry run)
+    python main.py --test-telegram   send a test message to check the bot and chat id
     python main.py --days 3 --no-ai  only read emails (Phase 1)
     python main.py --preview 35      show what would be sent to the AI for email 35
     python main.py --stats           show database statistics
@@ -19,6 +22,7 @@ import json
 import logging
 import sqlite3
 import sys
+import time
 
 import openai
 
@@ -35,7 +39,7 @@ def parse_args():
     parser.add_argument(
         "--no-ai",
         action="store_true",
-        help="only read and save emails, skip the AI extraction and judging",
+        help="only read and save emails, skip the AI extraction, judging and digest",
     )
     parser.add_argument(
         "--re-extract",
@@ -55,13 +59,23 @@ def parse_args():
     parser.add_argument(
         "--rebuild-db",
         action="store_true",
-        help="delete data/jobs.db and rebuild it from data/extracted/ (no Gmail, no AI). "
-             "WARNING: this also erases verdicts and notified_at (Phase 4/5 data)",
+        help="delete data/jobs.db and rebuild it from data/extracted/ (no Gmail, no AI); "
+             "verdicts and sent status are kept",
     )
     parser.add_argument(
         "--rejudge",
         action="store_true",
         help="clear all verdicts and judge every job again (no Gmail, no extraction)",
+    )
+    parser.add_argument(
+        "--no-send",
+        action="store_true",
+        help="print the Telegram digest instead of sending it; nothing is marked as sent",
+    )
+    parser.add_argument(
+        "--test-telegram",
+        action="store_true",
+        help="send a test message to Telegram and stop",
     )
     parser.add_argument(
         "--debug",
@@ -154,10 +168,12 @@ def rebuild_db():
     """Delete the database and fill it again from the cached extractions."""
     from job_radar import config
     from job_radar.email_reader import get_email_date
-    from job_radar.storage import save_jobs
+    from job_radar.storage import export_judgements, restore_judgements, save_jobs
 
+    # Remember verdicts and sent status BEFORE deleting anything.
+    saved, notified_email_uids = export_judgements(config.DB_PATH)
     if config.DB_PATH.exists():
-        print(f"Deleting {config.DB_PATH.name} ...")
+        print(f"Saved verdicts of {len(saved)} job(s); deleting {config.DB_PATH.name} ...")
         config.DB_PATH.unlink()
 
     files = sorted(config.EXTRACTED_DIR.glob("*.json"), key=uid_number)
@@ -170,7 +186,9 @@ def rebuild_db():
         else:
             seen_at = None  # save_jobs() then uses the current time
         save_jobs(jobs, config.DB_PATH, seen_at=seen_at)
-    print("Done.")
+
+    restored, marked, new = restore_judgements(config.DB_PATH, saved, notified_email_uids)
+    print(f"Restored {restored}, marked {marked} as already sent, {new} will be sent as new.")
 
 
 VERDICT_LABELS = [("match", "🟢 match"), ("unclear", "🟡 unclear"), ("skip", "❌ skip")]
@@ -224,6 +242,68 @@ def rejudge_all():
     judge_all()
 
 
+def send_digest(dry_run=False):
+    """Phase 5: send all judged, not yet sent jobs to Telegram, then mark them as sent.
+
+    dry_run=True prints the digest instead and marks nothing.
+    """
+    from job_radar import config
+    from job_radar.notifier import (
+        NO_ALERTS_WARNING,
+        PAUSE_BETWEEN_MESSAGES,
+        build_messages,
+        send_message,
+    )
+    from job_radar.storage import days_since_last_sighting, get_unnotified_jobs, mark_notified
+
+    jobs = get_unnotified_jobs(config.DB_PATH)
+    match_jobs = [job for job in jobs if job["verdict"] == "match"]
+    unclear_jobs = [job for job in jobs if job["verdict"] == "unclear"]
+    skip_ids = [job["id"] for job in jobs if job["verdict"] == "skip"]
+    skip_count = len(skip_ids)
+
+    days = days_since_last_sighting(config.DB_PATH)
+    warning = None
+    if days is not None and days >= 3:
+        warning = NO_ALERTS_WARNING
+
+    messages = build_messages(match_jobs, unclear_jobs, skip_count, warning=warning)
+
+    print()
+    if dry_run:
+        for number, message in enumerate(messages, start=1):
+            print(f"--- Telegram message {number} of {len(messages)} ---")
+            print(message["text"])
+        print("--- dry run: nothing sent, nothing marked as sent ---")
+        return
+
+    for number, message in enumerate(messages, start=1):
+        if number > 1:
+            time.sleep(PAUSE_BETWEEN_MESSAGES)  # be gentle with Telegram
+        try:
+            send_message(message["text"])
+        except RuntimeError:
+            print(f"Sent {number - 1} of {len(messages)} message(s); "
+                  "the jobs that did not arrive are sent again next run.")
+            raise  # main() prints the error and exits with code 1
+        # This message arrived: mark its jobs now, so a failure later on
+        # only resends the jobs that did not arrive.
+        mark_notified(config.DB_PATH, message["job_ids"])
+
+    # Skipped jobs are only counted in the header, so mark them once every
+    # message has arrived.
+    mark_notified(config.DB_PATH, skip_ids)
+    print(f"Sent {len(messages)} Telegram message(s); {len(jobs)} job(s) marked as sent.")
+
+
+def test_telegram():
+    """Send a short test message to check the bot token and chat id."""
+    from job_radar.notifier import send_message
+
+    send_message("✅ Job Radar test message")
+    print("Test message sent: check Telegram.")
+
+
 def show_stats():
     """Print the database statistics."""
     from job_radar import config
@@ -259,7 +339,9 @@ def main():
     # Every known problem prints one clear line instead of a traceback.
     # The order matters: Python uses the first "except" that matches.
     try:
-        if args.preview:
+        if args.test_telegram:
+            test_telegram()
+        elif args.preview:
             show_preview(args.preview)
         elif args.stats:
             show_stats()
@@ -274,6 +356,7 @@ def main():
                 # --re-extract turns the cache off for this run.
                 extract_and_store(emails, use_cache=not args.re_extract)
                 judge_all()
+                send_digest(dry_run=args.no_send)
     except RuntimeError as error:
         # Our own messages: missing setting, Gmail login failed, ...
         print(f"Error: {error}")

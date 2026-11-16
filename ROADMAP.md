@@ -80,12 +80,15 @@ Claude Code writes the code and explains it; I review, understand every line, an
   - Readable dedup key `company|title|location` after normalizing (accents, punctuation, legal suffixes like B.V.); when the company is empty (agencies like Randstad), the source is used instead: `|title|location|source`, because agencies use a different tracking link in every email
   - Dates come from the email's Date header; `--stats` and `--rebuild-db` (rebuild from `data/extracted/`) in `main.py`
   - Tests in `tests/test_storage.py` (pytest, in `requirements-dev.txt`)
-- [ ] **Phase 4:** AI judging (🟢 match / 🟡 unclear / ❌ skip): junior? English? location? skill match?
+- [x] **Phase 4:** AI judging (🟢 match / 🟡 unclear / ❌ skip): junior? English? location? skill match?
   - `judge.py`: the AI answers four checks (yes / no / unknown) and a short reason; Python decides the verdict (any no → skip, all yes → match, otherwise unclear)
   - One AI call per job; only job fields and `profile.txt` (gitignored, template in `profile.example.txt`) are sent, never links
   - Verdicts stored in `jobs.db` (verdict, verdict_reason, judge_checks, judged_at); `--rejudge` after profile changes; tests in `tests/test_judge.py`
 - [ ] **Phase 5:** Telegram digest, plus a warning after 3 days without alert emails
-  - Note: `--rebuild-db` will erase verdicts and notified_at; before Phase 5, make rebuild keep them or mark all rebuilt jobs as already notified, so old jobs are never re-sent.
+  - `notifier.py`: Telegram Bot API via `urllib` (no extra packages); HTML-escaped digest (🟢 match, 🟡 unclear sorted by yes-count, skipped only counted), split under 3,500 visible characters per message (plus a 12,000-character cap on the raw HTML); retries on network errors and HTTP 429
+  - Jobs are marked as sent per message, right after it arrives (skipped jobs after the last one), so a failure halfway only resends what did not arrive; `--no-send` (dry run) and `--test-telegram` in `main.py`
+  - Warning in the digest after 3 days without new jobs from the alerts
+  - `--rebuild-db` keeps verdicts and sent status: restored by dedup key; jobs that no longer match are marked as sent only if all their emails were fully sent
 - [ ] **Phase 6:** Automate with GitHub Actions, plus a backup run
 - [ ] **Phase 7:** README, tests, LinkedIn post
 
