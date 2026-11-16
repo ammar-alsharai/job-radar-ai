@@ -223,15 +223,24 @@ def pack_messages(blocks):
     return messages
 
 
-def build_messages(match_jobs, unclear_jobs, skip_count, warning=None):
+def waiting_line(waiting_count):
+    """The line shown when the AI rate limit stopped judging."""
+    return (f"⏳ {waiting_count} jobs are waiting for AI judgment (rate limit) "
+            "and will follow in a later digest")
+
+
+def build_messages(match_jobs, unclear_jobs, skip_count, warning=None, waiting_count=0):
     """Return the digest as a list of {"text": ..., "job_ids": [...]} dicts.
 
     job_ids are the listed (match and unclear) jobs in that message, so main.py
     can mark them as sent right after that message arrives.
+    waiting_count: jobs not judged yet because of the AI rate limit (shown on top).
     """
     blocks = []
     if warning:
         blocks.append((warning, []))
+    if waiting_count:
+        blocks.append((waiting_line(waiting_count), []))
 
     total = len(match_jobs) + len(unclear_jobs) + skip_count
     if total == 0:
@@ -261,7 +270,7 @@ def build_messages(match_jobs, unclear_jobs, skip_count, warning=None):
     return pack_messages(blocks)
 
 
-def build_digest(match_jobs, unclear_jobs, skip_count, warning=None):
+def build_digest(match_jobs, unclear_jobs, skip_count, warning=None, waiting_count=0):
     """Return the digest as a list of message strings (usually just one)."""
-    messages = build_messages(match_jobs, unclear_jobs, skip_count, warning)
+    messages = build_messages(match_jobs, unclear_jobs, skip_count, warning, waiting_count)
     return [message["text"] for message in messages]

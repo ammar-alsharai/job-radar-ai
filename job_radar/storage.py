@@ -209,17 +209,28 @@ def save_jobs(jobs, db_path, seen_at=None):
     return new_jobs
 
 
-def get_unjudged_jobs(db_path):
-    """Return every job without a verdict, as a list of dicts (oldest first)."""
+def get_unjudged_jobs(db_path, include_notified=False):
+    """Return jobs without a verdict, as a list of dicts (oldest first).
+
+    Normally only jobs that were NOT sent yet: judging an already-sent job
+    would only cost AI calls. include_notified=True (used by --rejudge) also
+    returns sent jobs.
+    """
     conn = connect(db_path)
     # sqlite3.Row lets us read columns by name (row["title"]) instead of by
     # position (row[1]), and dict(row) turns a row into a normal dict.
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            """SELECT id, title, company, location, language, seniority, salary, snippet
-               FROM jobs WHERE verdict IS NULL ORDER BY id"""
-        ).fetchall()
+        if include_notified:
+            rows = conn.execute(
+                """SELECT id, title, company, location, language, seniority, salary, snippet
+                   FROM jobs WHERE verdict IS NULL ORDER BY id"""
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, title, company, location, language, seniority, salary, snippet
+                   FROM jobs WHERE verdict IS NULL AND notified_at IS NULL ORDER BY id"""
+            ).fetchall()
     finally:
         conn.close()
     # "IS NULL" (not "= NULL"): in SQL, NULL means "no value", and nothing is
@@ -499,18 +510,18 @@ def set_meta(db_path, key, value):
         conn.close()
 
 
-def mark_all_judged_notified(db_path):
-    """Mark every judged, unsent job as sent WITHOUT sending it. Returns the number.
+def mark_all_notified(db_path):
+    """Mark EVERY unsent job as sent (judged or not) WITHOUT sending it. Returns the number.
 
-    Used once for the first cloud run, so old jobs are never sent.
+    Used once for the first cloud run, so old jobs are never sent and never
+    judged (get_unjudged_jobs skips sent jobs): no AI calls for them.
     """
     notified_at = datetime.now().astimezone().isoformat(timespec="seconds")
     conn = connect(db_path)
     try:
         with conn:
             cursor = conn.execute(
-                """UPDATE jobs SET notified_at = ?
-                   WHERE verdict IS NOT NULL AND notified_at IS NULL""",
+                "UPDATE jobs SET notified_at = ? WHERE notified_at IS NULL",
                 (notified_at,),
             )
             count = cursor.rowcount

@@ -105,7 +105,7 @@ def parse_args():
     parser.add_argument(
         "--mark-all-sent",
         action="store_true",
-        help="read, extract, store and judge, then mark every judged job as sent WITHOUT sending",
+        help="read, extract and store, then mark every job as sent WITHOUT judging or sending",
     )
     parser.add_argument(
         "--encrypt-db",
@@ -196,7 +196,12 @@ def read_emails(days, ci=False):
 
 
 def extract_and_store(emails, use_cache=True, ci=False):
-    """Phase 2 + 3: extract the jobs from every email that is not done yet, store them."""
+    """Phase 2 + 3: extract the jobs from every email that is not done yet, store them.
+
+    Returns the number of emails left waiting because the AI rate limit was hit
+    (0 normally). Those emails are not marked as processed, so the next run
+    extracts them.
+    """
     from job_radar import config
     from job_radar.email_reader import get_email_date
     from job_radar.extractor import extract_jobs
@@ -209,7 +214,8 @@ def extract_and_store(emails, use_cache=True, ci=False):
     new_jobs = []
     skipped = 0
     failed = 0
-    for item in emails:
+    waiting = 0
+    for index, item in enumerate(emails):
         # Already done in an earlier run (also on GitHub Actions, where the
         # data/extracted/ files of earlier runs do not exist): skip it.
         if use_cache and is_email_processed(config.DB_PATH, item["uid"]):
@@ -217,7 +223,13 @@ def extract_and_store(emails, use_cache=True, ci=False):
             continue
 
         raw_bytes = (config.RAW_EMAIL_DIR / f"{item['uid']}.eml").read_bytes()
-        jobs = extract_jobs(item["uid"], raw_bytes, use_cache=use_cache)
+        try:
+            jobs = extract_jobs(item["uid"], raw_bytes, use_cache=use_cache)
+        except openai.RateLimitError:
+            # Still over the limit after the client's own retries: stop here and
+            # keep this email and the rest for the next run.
+            waiting = count_unprocessed(emails[index:], use_cache)
+            break
         if jobs is None:
             failed += 1  # invalid AI answer: not marked, tried again next run
             continue
@@ -237,15 +249,18 @@ def extract_and_store(emails, use_cache=True, ci=False):
         new_jobs += save_jobs(jobs, config.DB_PATH, seen_at=get_email_date(raw_bytes))
         mark_email_processed(config.DB_PATH, item["uid"])
 
+    extracted = len(emails) - skipped - failed - waiting
     if ci:
-        print(f"Emails extracted: {len(emails) - skipped - failed} "
-              f"(already done: {skipped}, failed: {failed})")
+        print(f"Emails extracted: {extracted} "
+              f"(already done: {skipped}, failed: {failed}, waiting (rate limit): {waiting})")
         print(f"Jobs extracted: {total} (new: {len(new_jobs)})")
-        return
+        return waiting
 
     print()
-    print(f"Extracted this run: {total} job(s) from {len(emails) - skipped - failed} email(s): "
+    print(f"Extracted this run: {total} job(s) from {extracted} email(s): "
           f"{len(new_jobs)} new, {total - len(new_jobs)} already known.")
+    if waiting:
+        print(f"AI rate limit reached: {waiting} email(s) wait for the next run.")
     if skipped:
         print(f"Skipped {skipped} email(s) that were already processed.")
     if failed:
@@ -256,6 +271,19 @@ def extract_and_store(emails, use_cache=True, ci=False):
         for job in new_jobs:
             parts = [job["title"], job["company"], job["location"]]
             print("    " + " | ".join(part or "-" for part in parts))
+    return waiting
+
+
+def count_unprocessed(emails, use_cache):
+    """How many of these emails still need extraction (not processed before)."""
+    from job_radar import config
+    from job_radar.storage import is_email_processed
+
+    count = 0
+    for item in emails:
+        if not use_cache or not is_email_processed(config.DB_PATH, item["uid"]):
+            count += 1
+    return count
 
 
 def uid_number(path):
@@ -299,37 +327,49 @@ def rebuild_db():
 VERDICT_LABELS = [("match", "🟢 match"), ("unclear", "🟡 unclear"), ("skip", "❌ skip")]
 
 
-def judge_all(ci=False):
-    """Phase 4: judge every job without a verdict and print them grouped by verdict."""
+def judge_all(ci=False, include_notified=False):
+    """Phase 4: judge every unsent job without a verdict and print them grouped by verdict.
+
+    Returns the number of jobs left waiting because the AI rate limit was hit
+    (0 normally). They stay unjudged and are judged on the next run.
+    include_notified=True (for --rejudge) also judges jobs that were already sent.
+    """
     from job_radar import config
     from job_radar.judge import judge_job, load_profile
     from job_radar.storage import get_unjudged_jobs, save_verdict
 
-    jobs = get_unjudged_jobs(config.DB_PATH)
+    jobs = get_unjudged_jobs(config.DB_PATH, include_notified=include_notified)
     if not ci:
         print()
         print(f"Judging {len(jobs)} job(s) without a verdict ...")
     judged = {"match": [], "unclear": [], "skip": []}
+    waiting = 0
 
     if jobs:
         profile = load_profile()  # only needed when there is something to judge
-        for job in jobs:
-            result = judge_job(job, profile)
+        for index, job in enumerate(jobs):
+            try:
+                result = judge_job(job, profile)
+            except openai.RateLimitError:
+                # Still over the limit after the client's own retries: stop and
+                # keep this job and the rest unjudged for the next run.
+                waiting = len(jobs) - index
+                break
             if result is None:
                 continue  # invalid answer: stays unjudged, tried again next run
             # Saved right away, so a stop halfway (e.g. rate limit) loses nothing.
             save_verdict(config.DB_PATH, job["id"], result)
             judged[result["verdict"]].append((job, result["reason"]))
 
-    not_judged = len(jobs) - sum(len(items) for items in judged.values())
+    not_judged = len(jobs) - sum(len(items) for items in judged.values()) - waiting
 
     if ci:
-        print(f"Jobs judged: {len(jobs) - not_judged} (match: {len(judged['match'])}, "
+        print(f"Jobs judged: {len(jobs) - not_judged - waiting} (match: {len(judged['match'])}, "
               f"unclear: {len(judged['unclear'])}, skip: {len(judged['skip'])}, "
-              f"failed: {not_judged})")
-        return
+              f"failed: {not_judged}, waiting (rate limit): {waiting})")
+        return waiting
     if not jobs:
-        return
+        return waiting
 
     for verdict, label in VERDICT_LABELS:
         print()
@@ -341,6 +381,10 @@ def judge_all(ci=False):
     if not_judged:
         print()
         print(f"{not_judged} job(s) could not be judged (invalid AI answer); they are retried next run.")
+    if waiting:
+        print()
+        print(f"AI rate limit reached: {waiting} job(s) wait for judgment in the next run.")
+    return waiting
 
 
 def rejudge_all():
@@ -353,13 +397,17 @@ def rejudge_all():
     load_profile()
     count = clear_verdicts(config.DB_PATH)
     print(f"Re-judging {count} job(s): all verdicts cleared.")
-    judge_all()
+    judge_all(include_notified=True)
 
 
-def send_digest(dry_run=False, ci=False):
+def send_digest(dry_run=False, ci=False, waiting_jobs=0, rate_limited=False):
     """Phase 5: send all judged, not yet sent jobs to Telegram, then mark them as sent.
 
     dry_run=True prints the digest instead and marks nothing.
+    waiting_jobs: jobs not judged because of the AI rate limit (one line on top).
+    rate_limited=True: the AI rate limit was hit this run. Then last_digest_date
+    is NOT set, so a fallback run later today tries again; and if there is
+    nothing new to send, nothing is sent (no repeated messages).
     """
     from job_radar import config
     from job_radar.notifier import (
@@ -386,7 +434,12 @@ def send_digest(dry_run=False, ci=False):
     if days is not None and days >= 3:
         warning = NO_ALERTS_WARNING
 
-    messages = build_messages(match_jobs, unclear_jobs, skip_count, warning=warning)
+    if rate_limited and not jobs:
+        print(f"Nothing new to send; {waiting_jobs} job(s) wait for AI judgment (rate limit).")
+        return
+
+    messages = build_messages(match_jobs, unclear_jobs, skip_count, warning=warning,
+                              waiting_count=waiting_jobs)
 
     if dry_run:
         if ci:
@@ -413,23 +466,25 @@ def send_digest(dry_run=False, ci=False):
         mark_notified(config.DB_PATH, message["job_ids"])
 
     # Skipped jobs are only counted in the header, so mark them once every
-    # message has arrived. Then remember that today's digest is done.
+    # message has arrived. Then remember that today's digest is done, unless
+    # the rate limit left work for a later run today.
     mark_notified(config.DB_PATH, skip_ids)
-    set_meta(config.DB_PATH, "last_digest_date", date.today().isoformat())
+    if not rate_limited:
+        set_meta(config.DB_PATH, "last_digest_date", date.today().isoformat())
 
     if ci:
-        print(f"Telegram messages sent: {len(messages)}")
+        print(f"Telegram messages sent: {len(messages)} (jobs waiting for judgment: {waiting_jobs})")
     else:
         print()
         print(f"Sent {len(messages)} Telegram message(s); {len(jobs)} job(s) marked as sent.")
 
 
 def mark_all_sent():
-    """First cloud run: mark every judged job as sent without sending anything."""
+    """First cloud run: mark every job (judged or not) as sent without sending anything."""
     from job_radar import config
-    from job_radar.storage import mark_all_judged_notified
+    from job_radar.storage import mark_all_notified
 
-    count = mark_all_judged_notified(config.DB_PATH)
+    count = mark_all_notified(config.DB_PATH)
     print(f"Marked {count} job(s) as sent without sending.")
 
 
@@ -449,12 +504,18 @@ def run_pipeline(args):
     if args.no_ai:
         return
     # --re-extract turns the cache and the processed-emails check off for this run.
-    extract_and_store(emails, use_cache=not args.re_extract, ci=args.ci)
-    judge_all(ci=args.ci)
+    waiting_emails = extract_and_store(emails, use_cache=not args.re_extract, ci=args.ci)
+
     if args.mark_all_sent:
+        # No judging (no AI calls): everything is marked as sent and is never
+        # judged later, because only unsent jobs are judged.
         mark_all_sent()  # note: does NOT set last_digest_date
-    else:
-        send_digest(dry_run=args.no_send, ci=args.ci)
+        return
+
+    waiting_jobs = judge_all(ci=args.ci)
+    rate_limited = waiting_emails > 0 or waiting_jobs > 0
+    send_digest(dry_run=args.no_send, ci=args.ci,
+                waiting_jobs=waiting_jobs, rate_limited=rate_limited)
 
 
 def test_telegram():

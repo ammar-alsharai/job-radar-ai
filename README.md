@@ -35,7 +35,8 @@ Add these under *Settings → Secrets and variables → Actions → New reposito
 - **Main trigger:** an external scheduler ([cron-job.org](https://cron-job.org)) calls the GitHub API every day at 18:00 (Amsterdam time) to start the workflow (`workflow_dispatch`). It uses a fine-grained personal access token that is limited to this repository and has only the **Actions: write** permission.
 - **Fallback:** GitHub's own schedule at 20:23 and 21:23 (Europe/Amsterdam). GitHub's schedule is often hours late, so it is only a backup.
 - Every run uses `--skip-if-sent-today`: the first successful run of the day sends the digest, later runs stop right away.
-- A run can also be started by hand under *Actions → Daily job radar → Run workflow*. The `mark_all_sent` option is for the very first cloud run: it stores and judges the current jobs but marks them as sent without sending them.
+- A run can also be started by hand under *Actions → Daily job radar → Run workflow*. The `mark_all_sent` option is for the very first cloud run: it stores the current jobs and marks them as sent, without judging (no AI calls) and without sending them.
+- If the AI provider's rate limit is reached, the run does not fail: it sends the jobs that were judged, says in the digest how many are still waiting, and a later run continues with the rest.
 
 ### Keep it active
 
