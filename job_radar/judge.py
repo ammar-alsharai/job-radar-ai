@@ -53,9 +53,15 @@ Answer four checks, each "yes", "no" or "unknown":
 - junior_ok: is this job suitable for a junior or career starter? "no" for senior, lead, manager or roles that ask for several years of experience.
 - english_ok: can this job be done in English? Answer "no" ONLY if fluent or native Dutch is explicitly required. A listing written in Dutch without such a requirement is "unknown".
 - location_ok: is the job within 1 hour by public transport from Den Haag, or remote? "unknown" if the location is unclear.
-- skills_ok: does the job fit the target roles and skills in the profile? Be strict: "yes" only if the CORE of the job is data engineering, data analysis, software or backend development, or AI data annotation.
-  A passing mention of data, Python or software in a different kind of role (quality, manufacturing, lab, support, audit, sales) is "no".
-  Example of "no": a Quality Engineer whose snippet mentions data analysis.
+- skills_ok: does the job fit the target roles and skills in the profile?
+  "yes" when the core of the job is data engineering, data analysis, software or backend development, AI/ML engineering or AI data annotation. A title alone is enough when it clearly says so, even without a snippet.
+  "no" only when the job is CLEARLY in another field, such as quality, manufacturing, lab, hardware, support, audit or sales. A passing mention of data or software in such a role does not make it a fit.
+  "unknown" when the title is ambiguous and there is no snippet to decide.
+  Examples:
+  "AI Engineer" (no snippet) -> "yes"
+  "Data Engineer" (no snippet) -> "yes"
+  "Quality Engineer" whose snippet mentions data analysis -> "no"
+  "ICT Unit" (no snippet) -> "unknown"
 
 reason: one short English sentence (max 120 characters) explaining the most important point.
 """

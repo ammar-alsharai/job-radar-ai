@@ -39,10 +39,13 @@ def clean_company(company):
         return ""
     return company
 
-# What one AI answer must look like: {"jobs": [ {...}, {...} ]}
+# What one AI answer must look like: {"listings_seen": 3, "jobs": [ {...}, ... ]}
+# listings_seen comes BEFORE jobs: the model writes the fields in this order,
+# so it counts the listings first and then extracts them.
 JOB_SCHEMA = {
     "type": "object",
     "properties": {
+        "listings_seen": {"type": "integer"},
         "jobs": {
             "type": "array",
             "items": {
@@ -63,16 +66,17 @@ JOB_SCHEMA = {
             },
         },
     },
-    "required": ["jobs"],
+    "required": ["listings_seen", "jobs"],
     "additionalProperties": False,
 }
 
 SYSTEM_PROMPT = """You extract job vacancies from the text of a job-alert email.
 
 Rules:
+- First count the job listings in the email and put that number in listings_seen. Then extract every one of them, so "jobs" has exactly listings_seen items.
 - Extract EVERY job listing in the email, in the order they appear. Never skip a listing because it seems irrelevant, too senior or in another field: filtering happens later, not here.
 - Only extract job vacancies that are actually listed in the email. Never invent jobs or details.
-- If the email is not a job alert (for example an account confirmation, welcome, security or marketing email), return {"jobs": []}.
+- If the email is not a job alert (for example an account confirmation, welcome, security or marketing email), return {"listings_seen": 0, "jobs": []}.
 - Every field is required. Use "" for a text field the email does not give.
 
 Fields:
@@ -82,8 +86,9 @@ Fields:
   "Senior Service Technician| Lucid Motors Hilversum" -> "Senior Service Technician" (company and city removed)
   "Senior Manager / Director - Supply Chain Planning & Manufacturing Transformation Lead" -> unchanged (all parts describe the role)
   "Internship | Internal Audit" -> "Internship | Internal Audit" (both parts describe the role)
-- company: the company name only, without the location.
-  Example: "Eneco - Rotterdam" -> company "Eneco", location "Rotterdam".
+- company: the company name only, without the location and without review scores or ratings next to the name.
+  Examples: "Eneco - Rotterdam" -> company "Eneco", location "Rotterdam".
+  "Universiteit van Amsterdam 4.2" -> company "Universiteit van Amsterdam".
 - location: the city or region of the job, as written.
 - language: the working language of THIS job. Judge it only from this job's own title and snippet, or from an explicit language requirement for this job (for example "Dutch required" or "Engelstalig").
   Do NOT judge it from the language of the rest of the email, the email's headers or footers, or the job site.
@@ -109,6 +114,10 @@ def sender_domain(raw_bytes):
 def validate_jobs(data):
     """Check the AI answer. Return the list of jobs, or None if it is invalid."""
     if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
+        return None
+    # isinstance(True, int) is also True in Python, so rule out booleans explicitly.
+    listings_seen = data.get("listings_seen")
+    if not isinstance(listings_seen, int) or isinstance(listings_seen, bool) or listings_seen < 0:
         return None
     for job in data["jobs"]:
         if not isinstance(job, dict):
@@ -146,6 +155,26 @@ def ask_ai(text):
     return response.choices[0].message.content
 
 
+def get_valid_answer(uid, text):
+    """Ask the AI once and check the answer.
+
+    Returns (raw_jobs, listings_seen), or None if the answer is invalid.
+    """
+    answer = ask_ai(text)
+    try:
+        data = json.loads(answer)
+    except (json.JSONDecodeError, TypeError):
+        # TypeError: the answer was empty (None) instead of text.
+        logger.warning("UID %s: the AI did not return valid JSON, skipping", uid)
+        return None
+
+    raw_jobs = validate_jobs(data)
+    if raw_jobs is None:
+        logger.warning("UID %s: the AI answer does not match the schema, skipping", uid)
+        return None
+    return raw_jobs, data["listings_seen"]
+
+
 def extract_jobs(uid, raw_bytes, use_cache=True):
     """Return the jobs in one email as a list of dicts.
 
@@ -163,19 +192,22 @@ def extract_jobs(uid, raw_bytes, use_cache=True):
     logger.info("Asking the AI about email UID %s (%d characters)", uid, len(text))
     # The full prompt is only visible when logging is set to DEBUG.
     logger.debug("Text sent to the AI for UID %s:\n%s", uid, text)
-    answer = ask_ai(text)
-
-    try:
-        data = json.loads(answer)
-    except (json.JSONDecodeError, TypeError):
-        # TypeError: the answer was empty (None) instead of text.
-        logger.warning("UID %s: the AI did not return valid JSON, skipping", uid)
+    first = get_valid_answer(uid, text)
+    if first is None:
         return []
+    raw_jobs, listings_seen = first
 
-    raw_jobs = validate_jobs(data)
-    if raw_jobs is None:
-        logger.warning("UID %s: the AI answer does not match the schema, skipping", uid)
-        return []
+    # Completeness check: the AI counted more listings than it returned.
+    # Ask once more and keep the answer with the most jobs.
+    if len(raw_jobs) < listings_seen:
+        logger.warning("UID %s: the AI saw %d listings but returned %d jobs, retrying once",
+                       uid, listings_seen, len(raw_jobs))
+        second = get_valid_answer(uid, text)
+        if second is not None and len(second[0]) > len(raw_jobs):
+            raw_jobs, listings_seen = second
+        if len(raw_jobs) < listings_seen:
+            logger.warning("UID %s: still short after retry (%d listings seen, %d jobs), keeping it",
+                           uid, listings_seen, len(raw_jobs))
 
     jobs = []
     for raw_job in raw_jobs:
@@ -204,7 +236,8 @@ def extract_jobs(uid, raw_bytes, use_cache=True):
     # To spot dropped jobs: most listings have their own link code, so far fewer
     # jobs than codes can mean the AI skipped some. (Footer links such as
     # "unsubscribe" also get codes, so the numbers are never exactly equal.)
-    logger.debug("UID %s: %d link codes in the text, %d jobs returned", uid, len(links), len(jobs))
+    logger.debug("UID %s: %d link codes in the text, %d listings seen, %d jobs returned",
+                 uid, len(links), listings_seen, len(jobs))
 
     # Only valid results are saved, so a failed email is tried again next run.
     config.EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
