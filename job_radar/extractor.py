@@ -16,6 +16,8 @@ import logging
 from email import policy
 from email.utils import parseaddr
 
+import openai
+
 from job_radar import config
 from job_radar.ai_client import get_client
 from job_radar.email_cleaner import clean_email
@@ -155,12 +157,41 @@ def ask_ai(text):
     return response.choices[0].message.content
 
 
+# Groq's error code when the model's output did not match the strict JSON
+# schema (HTTP 400). It happens now and then for a single request, so we
+# retry once instead of stopping the run.
+JSON_VALIDATE_FAILED = "json_validate_failed"
+
+
+def ask_ai_with_json_retry(uid, text):
+    """Ask the AI; retry once if the provider says the JSON did not validate.
+
+    Returns the answer text, or None if it failed twice. Any other HTTP 400
+    is raised (a real configuration problem). Only the error CODE is logged:
+    the error message and body can contain email text, and logs can be public.
+    """
+    for attempt in [1, 2]:
+        try:
+            return ask_ai(text)
+        except openai.BadRequestError as error:
+            if error.code != JSON_VALIDATE_FAILED:
+                raise
+            if attempt == 1:
+                logger.warning("UID %s: AI error %s, retrying once", uid, error.code)
+            else:
+                logger.warning("UID %s: AI error %s again, skipped (retried next run)",
+                               uid, error.code)
+    return None
+
+
 def get_valid_answer(uid, text):
-    """Ask the AI once and check the answer.
+    """Ask the AI and check the answer.
 
     Returns (raw_jobs, listings_seen), or None if the answer is invalid.
     """
-    answer = ask_ai(text)
+    answer = ask_ai_with_json_retry(uid, text)
+    if answer is None:
+        return None
     try:
         data = json.loads(answer)
     except (json.JSONDecodeError, TypeError):

@@ -21,6 +21,8 @@ import json
 import logging
 import os
 
+import openai
+
 from job_radar import config
 from job_radar.ai_client import get_client
 
@@ -177,6 +179,33 @@ def ask_ai(user_text):
     return response.choices[0].message.content
 
 
+# Groq's error code when the model's output did not match the strict JSON
+# schema (HTTP 400). It happens now and then for a single request, so we
+# retry once instead of stopping the run.
+JSON_VALIDATE_FAILED = "json_validate_failed"
+
+
+def ask_ai_with_json_retry(job_id, user_text):
+    """Ask the AI; retry once if the provider says the JSON did not validate.
+
+    Returns the answer text, or None if it failed twice. Any other HTTP 400
+    is raised (a real configuration problem). Only the error CODE is logged:
+    the error message and body can contain job text, and logs can be public.
+    """
+    for attempt in [1, 2]:
+        try:
+            return ask_ai(user_text)
+        except openai.BadRequestError as error:
+            if error.code != JSON_VALIDATE_FAILED:
+                raise
+            if attempt == 1:
+                logger.warning("Job %s: AI error %s, retrying once", job_id, error.code)
+            else:
+                logger.warning("Job %s: AI error %s again, skipped (retried next run)",
+                               job_id, error.code)
+    return None
+
+
 def judge_job(job, profile):
     """Judge one job. Returns a dict with the four checks, reason and verdict,
     or None if the AI answer was invalid (the job then stays unjudged and is
@@ -186,7 +215,11 @@ def judge_job(job, profile):
     # Only visible with --debug: the profile and job text sent to the AI.
     logger.debug("Text sent to the AI for job %s:\n%s", job.get("id"), user_text)
 
-    result = validate_judgement(ask_ai(user_text))
+    answer = ask_ai_with_json_retry(job.get("id"), user_text)
+    if answer is None:
+        return None  # failed twice: stays unjudged, tried again next run
+
+    result = validate_judgement(answer)
     if result is None:
         logger.warning("Job %s: invalid AI answer, will try again next run", job.get("id"))
         return None

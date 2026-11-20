@@ -198,9 +198,11 @@ def read_emails(days, ci=False):
 def extract_and_store(emails, use_cache=True, ci=False):
     """Phase 2 + 3: extract the jobs from every email that is not done yet, store them.
 
-    Returns the number of emails left waiting because the AI rate limit was hit
-    (0 normally). Those emails are not marked as processed, so the next run
-    extracts them.
+    Returns (waiting, failed):
+    - waiting: emails left because the AI rate limit was hit (0 normally);
+    - failed: emails whose AI answer was invalid (e.g. JSON that did not
+      validate, even after one retry).
+    Neither is marked as processed, so the next run extracts them.
     """
     from job_radar import config
     from job_radar.email_reader import get_email_date
@@ -254,7 +256,7 @@ def extract_and_store(emails, use_cache=True, ci=False):
         print(f"Emails extracted: {extracted} "
               f"(already done: {skipped}, failed: {failed}, waiting (rate limit): {waiting})")
         print(f"Jobs extracted: {total} (new: {len(new_jobs)})")
-        return waiting
+        return waiting, failed
 
     print()
     print(f"Extracted this run: {total} job(s) from {extracted} email(s): "
@@ -271,7 +273,7 @@ def extract_and_store(emails, use_cache=True, ci=False):
         for job in new_jobs:
             parts = [job["title"], job["company"], job["location"]]
             print("    " + " | ".join(part or "-" for part in parts))
-    return waiting
+    return waiting, failed
 
 
 def count_unprocessed(emails, use_cache):
@@ -330,8 +332,10 @@ VERDICT_LABELS = [("match", "🟢 match"), ("unclear", "🟡 unclear"), ("skip",
 def judge_all(ci=False, include_notified=False):
     """Phase 4: judge every unsent job without a verdict and print them grouped by verdict.
 
-    Returns the number of jobs left waiting because the AI rate limit was hit
-    (0 normally). They stay unjudged and are judged on the next run.
+    Returns (waiting, not_judged):
+    - waiting: jobs left because the AI rate limit was hit (0 normally);
+    - not_judged: jobs whose AI answer was invalid (even after one retry).
+    Both stay unjudged and are judged on the next run.
     include_notified=True (for --rejudge) also judges jobs that were already sent.
     """
     from job_radar import config
@@ -367,9 +371,9 @@ def judge_all(ci=False, include_notified=False):
         print(f"Jobs judged: {len(jobs) - not_judged - waiting} (match: {len(judged['match'])}, "
               f"unclear: {len(judged['unclear'])}, skip: {len(judged['skip'])}, "
               f"failed: {not_judged}, waiting (rate limit): {waiting})")
-        return waiting
+        return waiting, not_judged
     if not jobs:
-        return waiting
+        return waiting, not_judged
 
     for verdict, label in VERDICT_LABELS:
         print()
@@ -384,7 +388,7 @@ def judge_all(ci=False, include_notified=False):
     if waiting:
         print()
         print(f"AI rate limit reached: {waiting} job(s) wait for judgment in the next run.")
-    return waiting
+    return waiting, not_judged
 
 
 def rejudge_all():
@@ -504,15 +508,22 @@ def run_pipeline(args):
     if args.no_ai:
         return
     # --re-extract turns the cache and the processed-emails check off for this run.
-    waiting_emails = extract_and_store(emails, use_cache=not args.re_extract, ci=args.ci)
+    waiting_emails, failed_emails = extract_and_store(
+        emails, use_cache=not args.re_extract, ci=args.ci)
 
     if args.mark_all_sent:
         # No judging (no AI calls): everything is marked as sent and is never
         # judged later, because only unsent jobs are judged.
         mark_all_sent()  # note: does NOT set last_digest_date
+        if args.ci:
+            print(f"AI answers skipped (invalid JSON): {failed_emails}")
         return
 
-    waiting_jobs = judge_all(ci=args.ci)
+    waiting_jobs, failed_jobs = judge_all(ci=args.ci)
+    if args.ci:
+        # Invalid answers (e.g. Groq's json_validate_failed twice): those
+        # emails/jobs are simply tried again in the next run.
+        print(f"AI answers skipped (invalid JSON): {failed_emails + failed_jobs}")
     rate_limited = waiting_emails > 0 or waiting_jobs > 0
     send_digest(dry_run=args.no_send, ci=args.ci,
                 waiting_jobs=waiting_jobs, rate_limited=rate_limited)
@@ -600,9 +611,13 @@ def main():
         print("AI rate limit reached, even after retries: wait a while and run again "
               "(emails that are already done are saved).")
         sys.exit(1)
-    except openai.BadRequestError:
-        print("The AI rejected the request: check that AI_MODEL supports strict JSON "
-              "schema output and that AI_REASONING_EFFORT is valid for that model.")
+    except openai.BadRequestError as error:
+        # Only the error CODE (e.g. "model_not_found"): the error message and
+        # body (e.g. "failed_generation") can contain email or job text, and
+        # GitHub Actions logs are public.
+        print(f"The AI rejected the request (code: {error.code or 'unknown'}): check that "
+              "AI_MODEL supports strict JSON schema output and that AI_REASONING_EFFORT "
+              "is valid for that model.")
         sys.exit(1)
     except openai.APIConnectionError:
         print("Could not connect to the AI provider: check your internet connection and AI_BASE_URL.")
