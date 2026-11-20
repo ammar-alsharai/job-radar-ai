@@ -112,7 +112,7 @@ Run `python main.py --help` for all options.
 
 ### On GitHub Actions
 
-The daily workflow is `.github/workflows/daily.yml`.
+The daily workflow is `.github/workflows/daily.yml`. It installs only what the run needs (`requirements.txt`); the tests run separately in `.github/workflows/tests.yml` on every push.
 
 1. Generate a key for the database encryption and keep it in a password manager:
    ```bash
@@ -148,7 +148,7 @@ Keep in mind:
 python -m pytest
 ```
 
-69 tests, all without network access (Gmail, the AI and Telegram are replaced by fakes). They also run on every push via `.github/workflows/tests.yml`.
+71 tests, all without network access (Gmail, the AI and Telegram are replaced by fakes). They run on every push via `.github/workflows/tests.yml` (not in the daily run).
 
 | File | What it covers |
 |---|---|

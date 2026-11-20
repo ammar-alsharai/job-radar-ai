@@ -323,3 +323,44 @@ def test_failure_on_message_2_marks_only_jobs_of_message_1(tmp_path, monkeypatch
     assert titles_in_message_1                                   # message 1 had jobs ...
     assert titles_in_message_1.isdisjoint(still_unsent)          # ... and they are marked
     assert still_unsent == ({f"Job {n}" for n in range(6)} - titles_in_message_1) | {"Skipped job"}
+
+
+# --- the 3-day warning (dates relative to today) -------------------------------
+
+def send_digest_with_last_sighting(tmp_path, monkeypatch, days_ago):
+    """Store one judged job last seen `days_ago` days before today, send the digest."""
+    from datetime import datetime, timedelta
+
+    import main
+    from job_radar import config, storage
+
+    db_path = tmp_path / "jobs.db"
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    seen_at = datetime.now().astimezone() - timedelta(days=days_ago)
+    storage.save_jobs([{"title": "Data Engineer", "company": "ACME", "location": "Den Haag",
+                        "link": "https://example.com/1", "source": "example.com",
+                        "email_uid": "1"}], db_path, seen_at=seen_at)
+    job_id = storage.get_unjudged_jobs(db_path)[0]["id"]
+    storage.save_verdict(db_path, job_id, {
+        "junior_ok": "yes", "english_ok": "yes", "location_ok": "yes", "skills_ok": "yes",
+        "reason": "Good fit.", "verdict": "match"})
+
+    sent = []
+
+    def fake_send(text):
+        sent.append(text)
+
+    monkeypatch.setattr(notifier, "send_message", fake_send)
+    main.send_digest()
+    assert storage.days_since_last_sighting(db_path) == days_ago
+    return sent
+
+
+def test_warning_after_4_days_without_new_jobs(tmp_path, monkeypatch):
+    sent = send_digest_with_last_sighting(tmp_path, monkeypatch, days_ago=4)
+    assert sent[0].startswith(NO_ALERTS_WARNING)
+
+
+def test_no_warning_when_last_sighting_is_recent(tmp_path, monkeypatch):
+    sent = send_digest_with_last_sighting(tmp_path, monkeypatch, days_ago=1)
+    assert NO_ALERTS_WARNING not in sent[0]

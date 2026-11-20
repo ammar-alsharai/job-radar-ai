@@ -7,7 +7,9 @@ for the next run, sends what it has, and exits normally (code 0).
 import json
 import logging
 import sys
+from datetime import datetime
 from email.message import EmailMessage
+from email.utils import format_datetime
 
 import httpx2
 import openai
@@ -67,7 +69,9 @@ def setup(tmp_path, monkeypatch):
         message = EmailMessage()
         message["From"] = "alerts@jobs.example"
         message["Subject"] = f"Alert {uid}"
-        message["Date"] = "Mon, 16 Nov 2026 08:00:00 +0100"
+        # "Now", not a fixed date: with a fixed date the digest gets the
+        # "no new jobs in 3 days" warning once that date is old enough.
+        message["Date"] = format_datetime(datetime.now().astimezone())
         message.set_content(f"Jobs in email {uid}")
         (config.RAW_EMAIL_DIR / f"{uid}.eml").write_bytes(message.as_bytes())
 

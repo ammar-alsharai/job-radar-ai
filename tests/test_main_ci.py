@@ -7,7 +7,9 @@ counts: no senders, subjects, titles, companies, reasons or links.
 import json
 import logging
 import sys
+from datetime import datetime
 from email.message import EmailMessage
+from email.utils import format_datetime
 
 import pytest
 
@@ -38,7 +40,8 @@ def fake_run(tmp_path, monkeypatch):
     message = EmailMessage()
     message["From"] = SENDER
     message["Subject"] = SUBJECT
-    message["Date"] = "Mon, 16 Nov 2026 08:00:00 +0100"
+    # "Now", not a fixed date, so the 3-day warning never appears here.
+    message["Date"] = format_datetime(datetime.now().astimezone())
     message.set_content(f"{TITLE} at {COMPANY} in Den Haag: {LINK}")
     (config.RAW_EMAIL_DIR / "7.eml").write_bytes(message.as_bytes())
 

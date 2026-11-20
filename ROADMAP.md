@@ -91,7 +91,7 @@ Claude Code writes the code and explains it; I review, understand every line, an
   - Warning in the digest after 3 days without new jobs from the alerts
   - `--rebuild-db` keeps verdicts and sent status: restored by dedup key; jobs that no longer match are marked as sent only if all their emails were fully sent
 - [x] **Phase 6:** Automate with GitHub Actions, plus a backup run
-  - `.github/workflows/daily.yml`: schedule at 11:23 with a backup at 14:23 (Europe/Amsterdam), plus workflow_dispatch for manual runs; `permissions: contents: read`; no artifacts, no pull request triggers
+  - `.github/workflows/daily.yml`: schedule at 11:23 with a backup at 14:23 (Europe/Amsterdam), plus workflow_dispatch for manual runs; `permissions: contents: read`; no artifacts, no pull request triggers; installs only `requirements.txt` (the tests run in `tests.yml` on every push)
   - Database kept in the Actions cache, encrypted with Fernet (`crypto_store.py`, secret `DB_ENCRYPTION_KEY`); restored and saved every run, also after a failure
   - State in the database: `processed_emails` (no re-extraction) and `meta.last_digest_date` (`--skip-if-sent-today`)
   - `--ci` prints only counts (public logs); `--mark-all-sent` for the first cloud run; profile from the `PROFILE_TEXT` secret

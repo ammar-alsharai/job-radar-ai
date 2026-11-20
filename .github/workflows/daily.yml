@@ -51,16 +51,11 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+          cache-dependency-path: requirements.txt
 
+      # Only what the daily run needs. The tests run on every push in tests.yml.
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
-
-      # No secrets here: the tests use dummy values (tests/conftest.py).
-      - name: Run tests
-        run: python -m pytest -q
+        run: pip install -r requirements.txt
 
       - name: Restore the encrypted database
         uses: actions/cache/restore@v6
